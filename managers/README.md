@@ -39,11 +39,7 @@ flowchart TD
     end
 
     subgraph Workers["Worker Instances"]
-        GW["GetWorker"]
-        SW["SetWorker"]
-        CW["CapabilityWorker"]
-        TW["TransactionWorker"]
-        SEQ["SequentialWorker"]
+        UWK["Get/Set/Cap/Seq/Tran"]
         SS["SubscribeSession"]
     end
 
@@ -60,13 +56,13 @@ flowchart TD
     MF -->|Unary Operations| UM
     MF -->|Subscribe Operations| SM
 
-    UM --> GW & SW & CW & TW & SEQ
+    UM --> UWK
     SM --> SS
 
-    GW & SW & CW & TW & SEQ -->|"ClientFactory.get_client()" | GC & NC
+    UWK -->|"ClientFactory.get_client()" | GC & NC
     SS -->|"ClientFactory.get_client()"| GC & NC
 
-    GW & SW & CW & TW & SEQ -->|Result Dict| OH
+    UWK -->|Result Dict| OH
     SS -->|StreamEvent via Queue| OH
 ```
 

@@ -39,17 +39,14 @@ flowchart TD
     end
 
     subgraph Sinks["Destination Sinks"]
-        S_OUT["sys.stdout"]
-        S_ERR["sys.stderr"]
-        S_FILE["File Sink (open('a'))"]
-        S_SYS["Syslog Server (RFC 5424)"]
+        S_STACK["sysout/stderr/file/syslog"]
     end
 
     W --> OH
     OH -->|protocol == 'gnmi'| GF
     OH -->|protocol == 'netconf'| NF
     GF & NF -->|JSON / XML / Text| OH
-    OH --> S_OUT & S_ERR & S_FILE & S_SYS
+    OH --> S_STACK
 ```
 
 ---

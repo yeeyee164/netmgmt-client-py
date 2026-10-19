@@ -64,7 +64,7 @@ This section provides a structured inventory of the codebase to help contributor
 
 ### Key Reference Documents
 - **Core Architecture & Data Flow:** [`docs/core_architecture_and_data_flow.md`](docs/core_architecture_and_data_flow.md)
-- **YANG Schema Engine Architecture:** [`core/README.md`](core/README.md) and [`docs/yang_schema_architecture.md`](docs/yang_schema_architecture.md)
+- **YANG Schema Engine Architecture:** [`core/README.md`](core/README.md) and [`docs/yang_schema_architecture.md`](docs/schema/yang_schema_architecture.md)
 - **NETCONF Client Milestones:** [`docs/milestone/milestone_netconf.md`](docs/milestone/milestone_netconf.md)
 - **Protocol Neutral Delivery Spec:** [`docs/RPC_structure/protocol_neutral_delivery_mode_spec.md`](docs/RPC_structure/protocol_neutral_delivery_mode_spec.md)
 - **User Guides:**

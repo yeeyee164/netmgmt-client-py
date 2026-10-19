@@ -32,15 +32,9 @@ flowchart TD
     end
 
     subgraph CoreEngine["Core Schema Engine (core/)"]
-        SM["SchemaManager (Singleton)"]
-        CR["ContextRegistry"]
-        SCTX["SchemaContext (libyang.Context)"]
-        SR["SchemaResolver"]
-        SDB["SchemaDB (SQLite + Models Cache)"]
-        MC["ModelCatalog"]
-        SV["SchemaValidator"]
-        DB["DataBuilder"]
-        SS["SchemaSerializer"]
+        SM["SchemaManager (Singleton Facade)"]
+        COMP["Schema Compilation & Cache\n(SchemaContext, ContextRegistry, SchemaDB, Resolver)"]
+        SER["Validation & Serialization\n(SchemaValidator, DataBuilder, SchemaSerializer)"]
     end
 
     subgraph ProtocolLayer["Protocol Clients (specs/)"]
@@ -49,21 +43,14 @@ flowchart TD
     end
 
     SC & SP --> SM
-    SM --> CR
-    CR --> SCTX
-    SM --> SR
-    SR --> SCTX
-    SR <--> SDB
-    SR -. "fetch_callback(name, rev)" .-> NC
-    GC & NC --> MC
-    MC --> SP
     CH --> SM
-    SM --> SV
-    SV --> SCTX
-    SM --> SS
-    SS --> DB
-    DB --> SCTX
-    SS --> NC & GC
+    SM <--> COMP
+    SM --> SER
+    SER <--> COMP
+    SER -->|Namespaced XML| NC
+    SER -->|RFC 7951 JSON| GC
+    COMP -. "Dynamic fetch (<get-schema>)" .-> NC
+    GC & NC -. "Capabilities discovery" .-> SP
 ```
 
 ---
