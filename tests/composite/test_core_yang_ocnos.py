@@ -28,8 +28,8 @@ OCNOS_USER = "admin"
 OCNOS_PASS = "Frontier12#"
 OCNOS_MODELS = ["ipi-streaming-telemetry", "ipi-interface"]
 
-YANG_DIR = Path(__file__).parent / "yang" / "ocnos_derived"
-ALT_YANG_DIR = Path(__file__).parent.parent / "test" / "yang" / "ocnos_derived"
+YANG_DIR = (Path(__file__).resolve().parent / "yang" / "ocnos_derived") if (Path(__file__).resolve().parent / "yang" / "ocnos_derived").exists() else (Path(__file__).resolve().parent.parent / "yang" / "ocnos_derived")
+ALT_YANG_DIR = (Path(__file__).resolve().parent.parent / "test" / "yang" / "ocnos_derived") if (Path(__file__).resolve().parent.parent / "test" / "yang" / "ocnos_derived").exists() else (Path(__file__).resolve().parent.parent.parent / "test" / "yang" / "ocnos_derived")
 
 
 @pytest.fixture(scope="module")

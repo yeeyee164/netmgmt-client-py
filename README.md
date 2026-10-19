@@ -1,111 +1,167 @@
-# gNMI Client (Python)
+# netmgnt-client-py
 
-A lightweight Python-based gNMI client designed to handle defined requests across multiple network targets. This tool supports various subscription modes and provides flexible configuration interfaces via the Command Line Interface (CLI) or YAML configuration files.
+A high-performance, protocol-agnostic Northbound (NB) network management and automation engine written in Python 3. 
 
-## Features
+**`netmgnt-client-py`** provides a unified interface to interact with multi-vendor Network Operating Systems (Cisco IOS-XE/XR, Juniper Junos, Arista EOS, Nokia SR Linux/SROS) using standardized, YANG-driven management protocols:
+* **gNMI** (gRPC Network Management Interface over HTTP/2)
+* **NETCONF** (RFC 6241, RFC 5277, RFC 6022 over SSH/TLS)
+* *(Planned)* **RESTCONF** (RFC 8040 over HTTPS)
 
-- **Unary Services**:
-  - `Capability`
-  - `Get`
-  - `SET`(TODO)
-- **Multiple Subscription Modes**:
-  - `ONCE`: Retrieve a single snapshot of the requested paths.
-  - `POLL`: Periodic retrieval of data.
-  - `STREAM`: Real-time updates with support for:
-    - `SAMPLE`: Data sent at a regular interval.
-    - `ON_CHANGE`: Data sent only when a value changes.
-    - `TARGET_DEFINED`: Mode defined by the network device.
-- **Multi-Target Support**: Ability to spawn multiple clients across a list of targets simultaneously using the `--target` option.
-- **Duplicated Requests**: Ability to request multiple Requests using the `--times` multiplier.
-- **Flexible Configuration**: 
-  - Dynamic CLI arguments for quick testing.
-  - YAML-based configuration files for complex, repeatable deployments.
-- **Customizable Output**: Define output types, destinations (e.g., `stdout`), and formats (e.g., `json`).
+---
 
-## Installation
+## Key Features
 
-Ensure you have Python 3.7+ installed.
+* **Dual Invocation Paradigms:**
+  * **Nested CLI Subparsers:** Intuitive command-line interface for ad-hoc inspection, troubleshooting, and one-liner automation (`client_main.py <protocol> <operation> [options]`).
+  * **Hierarchical YAML Pipelines:** Version-controlled multi-target orchestration, sequential multi-step transactional workflows, and streaming subscriptions (`client_main.py [protocol] -c config.yaml`).
+* **Multi-Protocol Operational Coverage:**
+  * **gNMI:** `capability`, `get`, `set` (atomic mutations), and `subscribe` (`STREAM` with `sample` or `on_change`, `ONCE` snapshots, and `POLL` interactive polling).
+  * **NETCONF:** `capability` (`<hello>`), `get`, `get-config`, RFC 6022 dynamic `get-schema`, `<edit-config>` with candidate datastore locking, candidate validation, confirmed commit with rollback timer, and RFC 5277 streaming event notifications.
+* **Integrated YANG Schema Engine:**
+  * Embedded `libyang` compilation and SQLite metadata caching (`core/schema_cache.db`).
+  * Offline path and leaf type validation enforcing `config false` write protection.
+  * Automatic translation between semantic models, RFC 7951 JSON, and namespaced XML subtrees.
+* **Pluggable Telemetry Sinks:**
+  * Route responses and real-time streaming telemetry to `stdout`, `stderr`, rotated local files, or RFC 5424 Syslog servers.
 
-## Usage
+---
 
-The client can be operated in two primary ways: through command-line arguments or a YAML configuration file.
+## Installation & Setup
 
-### 1. Using Command Line Interface (CLI)
+### Prerequisites
+* Python 3.10+ (Python 3.10.12 recommended)
+* System C-libraries for SSH and XML manipulation (`libxml2-dev`, `libxslt1-dev`, `libffi-dev`)
+* System C-libraries for `libyang`(>= v5.0.0) (`libpcre2`(>= 10.21))
 
-**Example: Single request (Capability Request)**
+### Quick Setup
+
 ```bash
-python main.py --target 10.0.0.1:57400 --mode capabilities
+# 1. Activate your virtual environment. For example:
+source $HOME/pyvenv3.10/bin/activate
+
+# 2. Install required Python packages
+pip install grpcio grpcio-tools ncclient xmltodict pyyaml lxml pytest libyang
+
+# 3. Verify CLI entrypoint
+python client_main.py --help
+python client_main.py gnmi --help
+python client_main.py netconf --help
 ```
 
-**Example: Single request (Get Request)**
-```bash
-python main.py --target 10.0.0.1:57400 --mode get --path '/interfaces/interface[name=hello]'
+---
+
+## Quick Usage
+
+The engine is launched via `client_main.py` using either command-line flags or YAML configuration files.
+
+Below cases were tested with this environment:
+```text
+
+  +--------------------+                                +--------------------+
+  |                    |                                |                    |
+  |   client_main.py   |   172.20.20.2:(830, 57401)     |   Nokia SR Linux   |
+  |               eth0 o<------------------------------>o mgmt-ipv4          |
+  +--------------------+                                +--------------------+
+
 ```
 
-**Example: Single request (ONCE mode)**
+### 1. CLI Quickstart
+
+#### gNMI Quick Commands
 ```bash
-python main.py --target 10.0.0.1:57400 subscribe --path '/interfaces/interface' --mode once
+# Query gNMI server capabilities
+python client_main.py -t 172.20.20.2:57401 -u admin -p NokiaSrl1! -i \
+  gnmi capability
+
+# Query operational state
+python client_main.py -t 172.20.20.2:57401 -u admin -p NokiaSrl1! -i \
+  gnmi get --path '/interfaces/interface[name=mgmt0]/state'
+
+# Mutate configuration
+python client_main.py -t 172.20.20.2:57401 -u admin -p NokiaSrl1! -i \
+  gnmi set --update-path '/interfaces/interface[name=mgmt0]/config/description' \
+           --update-value 'Configured-via-CLI'
+
+# Stream telemetry with a 10s sample interval
+python client_main.py -t 172.20.20.2:57401 -u admin -p NokiaSrl1! -i \
+  gnmi subscribe --mode stream --sub-mode sample --sample-interval 10 \
+                 --path '/interfaces/interface[name=mgmt0]/state/counters'
 ```
 
-**Example: Streaming updates (STREAM mode) with a 30s sample interval**
+#### NETCONF Quick Commands
 ```bash
-python3 gnmi_main.py --target 10.0.0.1:57400 --target 10.0.0.2:57400 \
-               subscribe --mode stream --sub-mode sample --sample-interval 30 --path '/system/config' 
+# Read running configuration
+python client_main.py -t 172.20.20.2:830 -u admin -p NokiaSrl1! \
+  netconf get-config --source running --filter '/interfaces'
+
+# Download YANG model directly from device (RFC 6022)
+python client_main.py -t 172.20.20.2:830 -u admin -p NokiaSrl1! \
+  netconf get-schema --identifier openconfig-system
+
+# Edit candidate datastore with exclusive lock, validation, and commit
+python client_main.py -t 172.20.20.2:830 -u admin -p NokiaSrl1! \
+  netconf edit-config --target candidate --config @payload.xml --lock --validate
+
+# Stream real-time NETCONF event notifications (RFC 5277)
+python client_main.py -t 172.20.20.2:830 -u admin -p NokiaSrl1! \
+  netconf subscribe --stream-name NETCONF
 ```
 
-**Example: Custom Output Format**
+---
+
+### 2. YAML Pipeline Quickstart
+
+Execute repeatable multi-operation workflows or multi-target subscriptions via YAML:
+
 ```bash
-python3 gnmi_main.py --target 10.0.0.1:57400 \
-               --output-format json --output-file-type stdout \
-               subscribe --mode once --path '/interfaces'
+python client_main.py gnmi -c pipeline_gnmi.yaml
+python client_main.py netconf -c pipeline_netconf.yaml
 ```
 
-### 2. Using YAML Configuration
-
-If you provide the `-c` or `--config` flag, the client will ignore other CLI arguments and use the settings defined in the YAML file.
-
-**Example of [request_exp_named_sub.yaml](request_exp_named_sub.yaml) :**
+**Example NETCONF Transaction Pipeline (`pipeline_netconf.yaml`):**
 ```yaml
-debug: false
+protocol: "netconf"
 
-subscriptions:
-  interfaces_B:
-    mode: "stream"
-    encoding: "json_ietf"
-    subscription:
-      path:
-      - '/interfaces/interface[name="mgmt0"]/state/counters'
-      - '/interfaces/interface[name="te0/2"]/state'
-      mode: "sample"
-      sample_interval: 90 # in seconds
-
-  interfaces:
-    mode: "stream"
-    encoding: "json_ietf"
-    subscription:
-      path:
-      - '/interfaces/interface[name="te0/12"]/state/counters'
-      - '/interfaces/interface[name="te0/13"]/state/counters'
-      mode: "sample"
-      sample_interval: 100 # in seconds
-        
 targets:
-  10.1.11.101:9339:
-    subscriptions:
-      - interfaces
-      - interfaces_B
+  172.20.20.2:830:
     username: "admin"
-    password: "admin123"
-    update_only: false
+    password: "NokiaSrl1!"
+    operations:
+      - capability: {}
+      - edit-config:
+          target: "candidate"
+          config: "payloads/interface_config.xml"
+          commit: false
+      - validate:
+          source: "candidate"
+      - commit:
+          confirmed: false
+      - get-config:
+          source: "running"
+          filter: '<interfaces xmlns="http://openconfig.net/yang/interfaces"/>'
 
 outputs:
-  log_file:
-    type: file
-    file-type: telemetry_res.json
+  default_output:
+    output-type: stdout
     format: json
 ```
 
-**Run with config:**
-```bash
-python3 gnmi_main.py --config config.yaml
-```
+---
+
+## Protocol User Guides
+
+For detailed, in-depth walkthroughs of all CLI flags, options, schema validation, and YAML orchestration patterns, consult the dedicated protocol user guides:
+
+| Protocol | Documentation Guide | Key Topics Covered |
+| :--- | :--- | :--- |
+| **gNMI** | [**gNMI User Guide**](docs/gnmi_usage.md) | `capability`, `get`, `set` mutations, `subscribe` (`STREAM`, `ONCE`, `POLL`), encodings, offline YANG validation, multi-target subscription pipelines. |
+| **NETCONF** | [**NETCONF User Guide**](docs/netconf_usage.md) | `capability`, `get`, `get-config`, RFC 6022 `get-schema`, `edit-config`, candidate locks, validation, confirmed commit with rollback, RFC 5277 event subscriptions. |
+
+---
+
+## Contributor & Architecture Navigation
+
+If you are developing or contributing to **`netmgnt-client-py`**:
+* **Architecture, Module Inventory & Guidelines:** Consult [`AGENTS.md`](AGENTS.md) for a concise component breakdown of each directory (`config/`, `core/`, `managers/`, `specs/`, `modules/`, `ui/`).
+* **YANG Schema & Caching Engine:** Consult [`core/README.md`](core/README.md) for data models, SQLite cache schemas, and `libyang` integration details.
+* **Running Tests:** Run the full test suite via `pytest tests/`.

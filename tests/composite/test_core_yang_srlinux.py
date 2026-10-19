@@ -29,8 +29,8 @@ SRLINUX_USER = "admin"
 SRLINUX_PASS = "NokiaSrl1!"
 SRLINUX_MODELS = ["openconfig-interfaces", "openconfig-system"]
 
-YANG_DIR = Path(__file__).parent / "yang" / "srlinux"
-ALT_YANG_DIR = Path(__file__).parent.parent / "test" / "yang" / "srlinux"
+YANG_DIR = (Path(__file__).resolve().parent / "yang" / "srlinux") if (Path(__file__).resolve().parent / "yang" / "srlinux").exists() else (Path(__file__).resolve().parent.parent / "yang" / "srlinux")
+ALT_YANG_DIR = (Path(__file__).resolve().parent.parent / "test" / "yang" / "srlinux") if (Path(__file__).resolve().parent.parent / "test" / "yang" / "srlinux").exists() else (Path(__file__).resolve().parent.parent.parent / "test" / "yang" / "srlinux")
 
 
 @pytest.fixture(scope="module")

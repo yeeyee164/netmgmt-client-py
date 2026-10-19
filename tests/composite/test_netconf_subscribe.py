@@ -324,7 +324,7 @@ class TestNetconfCLISubscribe:
         assert po.poll_timeout == 2.5
 
     def test_yaml_netconf_subscribe_parsing(self):
-        args = ["netconf", "-c", "tests/netconf_subscribe_test.yaml"]
+        args = ["netconf", "-c", "tests/fixtures/netconf_subscribe_test.yaml"]
         parsed = parse_args(args)
         assert len(parsed.sessions) == 1
         sess = parsed.sessions[0]
@@ -346,7 +346,7 @@ class TestNetconfCLISubscribe:
         assert sess.operation.selector.filter_type == "xpath"
 
     def test_yaml_netopeer2_subscribe_parsing(self):
-        args = ["netconf", "-c", "tests/netopeer2_subscribe_test.yaml"]
+        args = ["netconf", "-c", "tests/fixtures/netopeer2_subscribe_test.yaml"]
         parsed = parse_args(args)
         assert len(parsed.sessions) == 1
         sess = parsed.sessions[0]

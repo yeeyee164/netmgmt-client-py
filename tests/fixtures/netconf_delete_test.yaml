@@ -7,7 +7,7 @@ targets:
     operations:
       - edit-config:
           target: "candidate"
-          config: "tests/netconf_delete_desc.xml"
+          config: "tests/fixtures/netconf_delete_desc.xml"
           default_operation: "merge"
           error_option: "stop-on-error"
 

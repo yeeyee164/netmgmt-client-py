@@ -1,113 +1,97 @@
-# **Context & Task Brief for Antigravity Agent: Multi-Protocol Network Automation Client**
+# Context & Architecture Guide: netmgnt-client-py
 
-## Active Context & Directives
-- **Core architecture and data flow:** [`core_architecture_and_data_flow.md`](.agents/custom/core_architecture_and_data_flow.md)
-- **NETCONF client milestone:** [`milestone_netconf.md`](.agents/custom/milestone_netconf.md)
-- **Coding & Protocol Rules:** [`RULES.md`](.agents/rules/RULES.md)
-- **documents:** [`docs`](./docs)
+## 1. Project Background & Mission Statement
 
-## **1\. Project Background & System Identity**
+**`netmgnt-client-py`** is an enterprise-grade, protocol-agnostic Northbound (NB) network automation client engine written in Python 3. It interfaces with multi-vendor network operating systems (Cisco IOS-XE/XR, Juniper Junos, Arista EOS, Nokia SR Linux) using standardized YANG-based management protocols:
 
-You are acting as a **Senior Network Automation Software Architect and Principal Core Maintainer** working on the gnmi\_client\_py repository.
-
-### **Mission Statement**
-
-This project is an enterprise-grade, protocol-agnostic Northbound (NB) network automation engine written in Python 3\. It interfaces with multi-vendor network operating systems (Cisco IOS-XE/XR, Juniper Junos, Arista EOS, Nokia SR OS) using standardized YANG-based management protocols:
-
-1. **gNMI** (gRPC Network Management Interface via grpcio and Protobuf stubs in specs/gnmi/).  
-2. **NETCONF** (RFC 6241, RFC 5277, RFC 6022 via ncclient over SSH/TLS).  
-3. *(Planned)* **RESTCONF** (RFC 8040 via requests / HTTPS).
+1. **gNMI** (gRPC Network Management Interface via `grpcio` and Protobuf stubs in `specs/gnmi/`).
+2. **NETCONF** (RFC 6241, RFC 5277, RFC 6022 via `ncclient` over SSH/TLS).
+3. *(Planned)* **RESTCONF** (RFC 8040 over HTTPS).
 
 The engine supports dual execution paradigms:
+* **Nested CLI Subparsers:** `python client_main.py <protocol> <operation> [options]`
+* **Hierarchical YAML Pipelines:** `python client_main.py [gnmi|netconf] -c config.yaml` (supporting multi-target, multi-subscription, and multi-operation orchestration).
 
-* **Nested CLI Subparsers:** client\_main.py \<protocol\> \<operation\> \[options\]  
-* **Hierarchical YAML Configuration:** client\_main.py \[gnmi\/netconf\] \-c config.yaml (supporting multi-target, multi-subscription, and multi-operation orchestration).
+---
 
-## **2\. Directory Layout**
+## 2. Module Directory & Navigation Guide
 
-Familiarize yourself with the workspace layout before making any modifications:
+This section provides a structured inventory of the codebase to help contributors and agents quickly locate and navigate modules without needing to read entire subtrees:
 
-### 2.1 Directory Layout
+| Path | Primary Exports / Components | Primary Role & Description |
+| :--- | :--- | :--- |
+| [`client_main.py`](client_main.py) | Entrypoint script | Universal CLI launcher; parses arguments, sets up logging, builds `ParsedConfig`, and dispatches to `ManagerFactory`. |
+| [`config/`](config/) | `SessionConfig`, `OperationConfig`, `DeliveryPolicy`, `SchemaConfig` | Domain configuration layer. Decouples session parameters into `ConnectionConfig`, `ExecutionConfig`, `OperationConfig`, and `SchemaConfig`. Defines protocol-neutral `DeliveryMode` (RFC 8641). |
+| [`config/protocol_options/`](config/protocol_options/) | `GnmiOptions`, `NetconfOptions` | Protocol-specific configuration structures (gNMI encodings/sample intervals; NETCONF datastores, locks, confirmed commits, RFC 5277 parameters). |
+| [`core/`](core/) | `SchemaManager`, `SchemaContext`, `SchemaDB`, `SchemaValidator`, `SchemaSerializer` | Protocol-agnostic YANG schema compilation, SQLite metadata caching (`schema_cache.db`), topological dependency resolution, path validation, and `libyang` XML/JSON serialization. Detailed guide in [`core/README.md`](core/README.md). |
+| [`managers/`](managers/) | `ManagerFactory`, `UnaryManager`, `SubscriptionManager`, Worker classes | Concurrency and orchestration layer. Dispatches unary tasks via `ThreadPoolExecutor` and streaming telemetry via worker threads and a centralized `queue.Queue`. |
+| [`specs/`](specs/) | `BaseClient`, `GNMIClient`, `NetconfClient`, `BaseValidator`, Stream types | Concrete protocol implementations. Implements gRPC calls for gNMI and `ncclient` SSH/TLS sessions for NETCONF. Implements semantic operations (`execute_capabilities`, `execute_get`, `execute_set`, `execute_subscribe`, `execute_transaction`, `execute_schema`). |
+| [`specs/gnmi/`](specs/gnmi/) | `gnmi_pb2.py`, `gnmi_pb2_grpc.py`, `gnmi_ext_pb2.py` | Compiled Google gNMI Protocol Buffer stubs. |
+| [`modules/`](modules/) | `OutputHandler`, `ProtocolFormatter`, `SecurityModule`, `parse_path` | Output routing (STDOUT, STDERR, file, RFC 5424 syslog), formatters (JSON, XML, text), TLS/SSH security profiles, and XPath string parsing. |
+| [`ui/`](ui/) | `build_args`, `config_builder`, `ParsedConfig` | Interface ingestion layer. Defines `argparse` nested subparsers and hierarchical YAML parser that normalizes inputs into `ParsedConfig`. |
+| [`util/`](util/) | `utils.py` | Common helper functions (file reading, byte conversions, string formatting). |
+| [`protos/`](protos/) | `gnmi.proto`, `gnmi_ext.proto`, `tunnel.proto` | Source Protocol Buffer definitions for gNMI and gRPC tunneling. |
+| [`tests/`](tests/) | Unit & Composite test suites, YAML/XML fixtures | Test suite covering models, validators, managers, schema compilation, transaction lifecycles, and streaming subscriptions. |
+| [`docs/`](docs/) | Architecture and user guides | Detailed specifications, milestone records, and protocol user guides ([`docs/gnmi_usage.md`](docs/gnmi_usage.md), [`docs/netconf_usage.md`](docs/netconf_usage.md)). |
+
+---
+
+## 3. Core Architecture & Data Flow
 
 ```text
-.
-├── client_main.py                       # Universal CLI entrypoint and orchestrator launcher 
-├── config
-│   ├── __init__.py
-│   ├── delivery.py                      # defines fields for specific protocol 
-│   ├── model.py                         # divides SessionConfig into three classes: ConnectionConfig, ExecutionConfig and OperationConfig
-│   ├── operations.py                    # define RPC based classes
-│   ├── protocol_options                 # optional contents for each protocol
-│   │   ├── __init__.py
-│   │   ├── gnmi.py
-│   │   └── netconf.py
-│   └── selectors.py                     # define path(gNMI, RESTCONF), filter(NETCONF) selector
-├── docs                                 # document markdown currently proceed so far
-│   ├── gNMI_Set.md
-│   ├── netconf_phase2_prompt.md
-│   ├── semantic_configuration_refactor_report_procedure.md
-│   └── session_config_RPC_separation.md
-├── managers
-│   ├── __init__.py
-│   ├── factory.py                      # ClientFactory (instantiates BaseClient implementations)
-│   ├── manager.py                      # ManagerFactory, UnaryManager (ThreadPool), SubscriptionManager (Streaming)
-│   ├── subscribe_session.py            # SubscriptionManager manages RPC that needs to sustain session
-│   └── unary_worker.py                 # UnaryManager manages Unary RPCs which doesn't need to sustain session
-├── modules
-│   ├── __init__.py
-│   ├── formatter.py                    # ProtocolFormatter, GNMIFormatter, NETCONFFormatter (xmltodict, minidom) 
-│   ├── logger.py                       # Centralized logging module (Console, Syslog RFC 5424, file logging)  
-│   ├── output.py                       # OutputHandler (routes structured telemetry to stdout, stderr, or files)
-│   ├── path.py                         # validating gNMI Path information
-│   ├── path_test.py
-│   ├── security.py                     # SecurityProfile dataclass & SecurityModule class
-│   └── validate.py                     # define validating logics
-├── protos
-│   └── gnmi                            # gNMI and gRPC tunnel definition
-│       ├── gnmi.proto
-│       ├── gnmi_ext.proto
-│       └── tunnel.proto
-├── request_exp_named_sub.yaml
-├── specs
-│   ├── __init__.py
-│   ├── base_client.py                  # abstract protocol layer for NorthBound client RPC
-│   ├── base_validator.py               # specify base validator classes
-│   ├── client.py                       # specify all classes for each client module
-│   ├── gnmi                            # gNMI protocol buffer stub code
-│   ├── gnmi_client.py                  # gNMI Client module that implements BaseClass
-│   ├── gnmi_validator.py               # simple validator of gNMI Client module
-│   └── netconf_client.py               # NETCONF Client module that implements BaseClass
-├── tests                               # where the unit tests are resided
-├── ui
-│   ├── __init__.py
-│   └── cmd.py       # Nested Command line and YAML parser (outputs are list of BaseSessionConfig inside of ParsedConfig)
-└── util
-    ├── __init__.py
-    └── utils.py     # Defines utility functions for every python modules 
+[ CLI Input / YAML Config ]
+            │
+            ▼
+       [ ui/cmd.py ]  ──────────> Creates [ ParsedConfig ] -> [ SessionConfig ]
+            │
+            ▼
+   [ ManagerFactory ]
+        ├── UnaryManager            ───> Spawns Worker Threads [ GetWorker / SetWorker / CapabilityWorker / TransactionWorker / SequentialWorker ]
+        └── SubscriptionManager     ───> Spawns Worker Threads [ SubscribeSession ]
+                                                │
+                                                ▼
+                                        [ ClientFactory ]
+                                        ├── GNMIClient (BaseClient)    ──> HTTP/2 (gRPC via grpcio)
+                                        └── NetconfClient (BaseClient) ──> SSH / TLS (ncclient)
+                                                │
+                                                ▼
+                                        [ OutputHandler ]
+                                        └── Formatter (GNMIFormatter / NETCONFFormatter)
+                                                │
+                                                ▼
+                                     [ stdout / stderr / file / syslog ]
 ```
 
-## 3. Project Initialization and Environment Setup
+### Key Reference Documents
+- **Core Architecture & Data Flow:** [`docs/core_architecture_and_data_flow.md`](docs/core_architecture_and_data_flow.md)
+- **YANG Schema Engine Architecture:** [`core/README.md`](core/README.md) and [`docs/yang_schema_architecture.md`](docs/schema/yang_schema_architecture.md)
+- **NETCONF Client Milestones:** [`docs/milestone/milestone_netconf.md`](docs/milestone/milestone_netconf.md)
+- **Protocol Neutral Delivery Spec:** [`docs/RPC_structure/protocol_neutral_delivery_mode_spec.md`](docs/RPC_structure/protocol_neutral_delivery_mode_spec.md)
+- **User Guides:**
+  - gNMI User Guide: [`docs/gnmi_usage.md`](docs/gnmi_usage.md)
+  - NETCONF User Guide: [`docs/netconf_usage.md`](docs/netconf_usage.md)
 
-Before executing tasks, verify the virtual environment and required dependencies:
+---
 
-### Prerequisites & Dependencies
-* Python 3.10+ (Python 3.10+ recommended)
-* System C-libraries for SSH and XML manipulation (libxml2-dev, libxslt1-dev, libffi-dev)
+## 4. Environment & Verification
 
-### Setup commands
+### Prerequisites
+* Python 3.10+ (Python 3.10.12 tested)
+* System C-libraries for SSH and XML manipulation (`libxml2-dev`, `libxslt1-dev`, `libffi-dev`)
+* System C-libraries for `libyang`(>= v5.0.0) (`libpcre2`(>= 10.21))
 
+### Virtual Environment & Dependencies
 ```bash
-# 1. activate virtual environment(optional)
-cat $HOME/.bashrc | grep venv 
+# Activate virtual environment
+source $HOME/pyvenv3.10/bin/activate
 
-# 2. Upgrade core tooling
-pip install --upgrade pip setuptools wheel
+# Install / update core dependencies
+pip install grpcio grpcio-tools ncclient xmltodict pyyaml lxml pytest libyang
 
-# 3. Install Python dependencies
-pip install grpcio grpcio-tools ncclient xmltodict pyyaml lxml pytest
-
-# 4. Verify CLI entrypoint
-python client_main.py --help
-python client_main.py gnmi --help
-python client_main.py netconf --help
+# Run the test suite
+pytest tests/
 ```
+
+### Testing Guidelines
+* All tests in the test suite(`./tests`) must pass without regressions before committing code changes.
+* When adding new RPC capabilities, create corresponding unit tests and composite workflow YAML fixtures in `tests/`.

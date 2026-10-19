@@ -222,11 +222,11 @@ class TestConfigBuildersIntegration(unittest.TestCase):
 
     def test_yaml_files_parsing(self):
         expected_modes = {
-            "tests/gnmi_subscribe_once_test.yaml": DeliveryMode.SNAPSHOT,
-            "tests/gnmi_subscribe_poll_test.yaml": DeliveryMode.ON_DEMAND,
-            "tests/gnmi_subscribe_stream_sample_test.yaml": DeliveryMode.PERIODIC,
-            "tests/gnmi_subscribe_stream_on_change_test.yaml": DeliveryMode.EVENT_DRIVEN,
-            "tests/gnmi_subscribe_stream_target_defined_test.yaml": DeliveryMode.SERVER_DETERMINED,
+            "tests/fixtures/gnmi_subscribe_once_test.yaml": DeliveryMode.SNAPSHOT,
+            "tests/fixtures/gnmi_subscribe_poll_test.yaml": DeliveryMode.ON_DEMAND,
+            "tests/fixtures/gnmi_subscribe_stream_sample_test.yaml": DeliveryMode.PERIODIC,
+            "tests/fixtures/gnmi_subscribe_stream_on_change_test.yaml": DeliveryMode.EVENT_DRIVEN,
+            "tests/fixtures/gnmi_subscribe_stream_target_defined_test.yaml": DeliveryMode.SERVER_DETERMINED,
         }
 
         for path, exp_mode in expected_modes.items():
