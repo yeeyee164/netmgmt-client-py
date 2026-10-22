@@ -211,8 +211,8 @@ class ParsedConfig:
 
         And our management will use that for configure.
     """
-    sessions: List[SessionConfig] # List of all individual sessions to spawn
-    targets: List[str] = field(default_factory=list) # List of "IP:PORT" strings
+    sessions: List[SessionConfig] = field(default_factory=list)  # List of all individual sessions to spawn
+    targets: List[str] = field(default_factory=list)  # List of "IP:PORT" strings
     outputs: List[OutputConfig] = field(default_factory=list)  # Outputs definitions
     debug: bool = False           # Global debug flag
 
@@ -220,6 +220,24 @@ class ParsedConfig:
     log_level: str = "ERROR"
     syslog_server: str = ""
     log_file: str = ""
+
+    # Application Service Layer DTOs & Device Inventory
+    requests: List[Any] = field(default_factory=list)
+    device_registry: Optional[Any] = None
+
+    def __post_init__(self):
+        if self.sessions and not self.requests:
+            for s in self.sessions:
+                try:
+                    self.requests.append(session_to_execution_request(s))
+                except Exception:
+                    pass
+        elif self.requests and not self.sessions:
+            for r in self.requests:
+                try:
+                    self.sessions.append(execution_request_to_session(r, registry=self.device_registry))
+                except Exception:
+                    pass
 
     def __str__(self):
         session_strs = "\n".join([str(s) for s in self.sessions])
@@ -973,18 +991,55 @@ class FileConfigBuilder(ConfigBuilder):
             raise FileConfigError(f"Given protocol is {global_protocol}, "
                                   f"but user runs with protocol {self.protocol}")
 
+        # Optional `devices:` inventory block backed by DeviceRegistryService
+        from application.devices import DeviceRegistryService
+        from application.dto import AdhocEndpointDTO
+        device_registry = DeviceRegistryService()
+        raw_devices = d.get('devices', {})
+        if isinstance(raw_devices, dict):
+            for dev_id, dev_info in raw_devices.items():
+                if not isinstance(dev_info, dict):
+                    continue
+                dev_target = dev_info.get('target') or dev_info.get('host', '')
+                dev_proto = dev_info.get('protocol', global_protocol) or self.protocol or 'gnmi'
+                dev_sec = dev_info.get('security', {}) if isinstance(dev_info.get('security'), dict) else {}
+                ep_dto = AdhocEndpointDTO(
+                    target=str(dev_target),
+                    protocol=str(dev_proto),
+                    username=dev_info.get('username', global_username),
+                    password=dev_info.get('password', global_password),
+                    tls_ca=dev_sec.get('tls_ca', global_sec_cfg.get('tls_ca', '')) or None,
+                    tls_cert=dev_sec.get('tls_cert', global_sec_cfg.get('tls_cert', '')) or None,
+                    tls_key=dev_sec.get('tls_key', global_sec_cfg.get('tls_key', '')) or None,
+                    skip_verify=bool(dev_sec.get('skip_verify', global_sec_cfg.get('skip_verify', False))),
+                    insecure=bool(dev_info.get('insecure', global_insecure)),
+                    tls_server_name=dev_sec.get('tls_server_name', global_sec_cfg.get('tls_server_name', '')) or None,
+                    tls_version=dev_sec.get('tls_version', global_sec_cfg.get('tls_version', '')) or None,
+                    ssh_key=dev_sec.get('ssh_key', global_sec_cfg.get('ssh_key')) or None,
+                )
+                device_registry.register_device(str(dev_id), ep_dto)
+
+        session_device_ids: List[Optional[str]] = []
+
         # targets in YAML
         for target_ip_port, tgt_info in targets.items():
-            t_username = tgt_info.get('username', global_username)
-            t_password = tgt_info.get('password', global_password)
+            ref_device_id: Optional[str] = tgt_info.get('device_id')
+            if not ref_device_id and device_registry.has_device(str(target_ip_port)):
+                ref_device_id = str(target_ip_port)
+
+            reg_ep = device_registry.get_device(ref_device_id) if ref_device_id else None
+            resolved_target = reg_ep.target if reg_ep else str(target_ip_port)
+
+            t_username = tgt_info.get('username', reg_ep.username if (reg_ep and reg_ep.username is not None) else global_username)
+            t_password = tgt_info.get('password', reg_ep.password if (reg_ep and reg_ep.password is not None) else global_password)
             t_times = tgt_info.get('times', global_times)
-            t_protocol = tgt_info.get('protocol', global_protocol) or 'gnmi'
-            t_insecure = tgt_info.get('insecure', global_insecure)
+            t_protocol = tgt_info.get('protocol', reg_ep.protocol if reg_ep else global_protocol) or 'gnmi'
+            t_insecure = tgt_info.get('insecure', reg_ep.insecure if reg_ep else global_insecure)
             proto_enum = Protocol.GNMI if t_protocol.lower() == 'gnmi' else Protocol.NETCONF
             t_schema = _parse_schema_config(tgt_info.get('schema'), fallback_dict=tgt_info) if ('schema' in tgt_info or any(k in tgt_info for k in ('yang_dirs', 'yang_dir', 'validate', 'enable_schema_validation'))) else global_schema
 
             conn = ConnectionConfig(
-                target=str(target_ip_port),
+                target=str(resolved_target),
                 username=t_username,
                 password=t_password,
                 security=global_security,
@@ -1012,6 +1067,7 @@ class FileConfigBuilder(ConfigBuilder):
                     schema=t_schema,
                 )
                 sessions.append(session)
+                session_device_ids.append(ref_device_id)
                 continue
 
             # Deprecate legacy top-level target fields
@@ -1059,7 +1115,7 @@ class FileConfigBuilder(ConfigBuilder):
                 raise FileConfigError(f"target {target_ip_port} holds two or more RPC types - only one type of RPC is allowed")
 
             conn = ConnectionConfig(
-                target=str(target_ip_port),
+                target=str(resolved_target),
                 username=t_username,
                 password=t_password,
                 security=global_security,
@@ -1077,6 +1133,7 @@ class FileConfigBuilder(ConfigBuilder):
                     schema=t_schema,
                 )
                 sessions.append(session)
+                session_device_ids.append(ref_device_id)
             elif is_get_schema:
                 ident = tgt_info.get('identifier') or (t_get_list[0] if t_get_list else '')
                 op_obj = GetSchemaOperation(
@@ -1092,6 +1149,7 @@ class FileConfigBuilder(ConfigBuilder):
                     schema=t_schema,
                 )
                 sessions.append(session)
+                session_device_ids.append(ref_device_id)
             elif is_subscribe: # Subscribe
                 subs = d.get('subscriptions', {})
                 for sub_name in t_sub_list:
@@ -1166,6 +1224,7 @@ class FileConfigBuilder(ConfigBuilder):
                         schema=t_schema,
                     )
                     sessions.append(session)
+                    session_device_ids.append(ref_device_id)
             elif is_get: # Get / Get-Config
                 paths = t_get_list if t_get_list else tgt_info.get('paths', [])
                 if isinstance(paths, str):
@@ -1196,6 +1255,7 @@ class FileConfigBuilder(ConfigBuilder):
                     schema=t_schema,
                 )
                 sessions.append(session)
+                session_device_ids.append(ref_device_id)
             else: # Set / Edit-Config
                 if proto_enum == Protocol.NETCONF and t_raw_config:
                     cfg_payload = read_payload(t_raw_config) if isinstance(t_raw_config, str) else str(t_raw_config)
@@ -1313,6 +1373,7 @@ class FileConfigBuilder(ConfigBuilder):
                     schema=t_schema,
                 )
                 sessions.append(session)
+                session_device_ids.append(ref_device_id)
 
         # Parsing outputs
         outputs = []
@@ -1332,12 +1393,19 @@ class FileConfigBuilder(ConfigBuilder):
                     path = og_item.get('path')
                 ))
 
+        requests = [
+            session_to_execution_request(sess, device_id=dev_id)
+            for sess, dev_id in zip(sessions, session_device_ids)
+        ]
+
         return ParsedConfig(
             sessions=sessions, targets=targets,
             outputs=outputs, debug=debug,
             log_level=d.get('log_level', 'ERROR'),
             syslog_server=d.get('syslog_server', ''),
             log_file=d.get('log_file', ''),
+            requests=requests,
+            device_registry=device_registry if raw_devices else None,
         )
 
 def add_schema_args(p: Any, is_child: bool = False) -> None:
@@ -1583,3 +1651,200 @@ def config_builder(args) -> ParsedConfig:
 def parse_args(args=None) -> ParsedConfig:
     """Helper to parse raw argument list and build ParsedConfig directly."""
     return config_builder(build_args(args))
+
+
+def session_to_execution_request(session: SessionConfig, device_id: Optional[str] = None) -> Any:
+    """
+    Converts an internal SessionConfig to an external ExecutionRequestDTO.
+    """
+    from application.dto import (
+        ExecutionRequestDTO,
+        AdhocEndpointDTO,
+        OperationStepDTO,
+        MutationChangeDTO,
+        TelemetryPolicyDTO,
+        DeliveryModeDTO,
+    )
+    from config.operations import (
+        CapabilitiesOperation,
+        GetOperation,
+        GetConfigOperation,
+        GetSchemaOperation,
+        SetOperation,
+        EditConfigOperation,
+        TransactionOperation,
+        SubscribeOperation,
+    )
+    from config.selectors import FilterSelector
+
+    conn = session.connection
+    sec = conn.security
+    proto_str = session.protocol.value if hasattr(session.protocol, "value") else str(session.protocol).lower()
+    adhoc = AdhocEndpointDTO(
+        target=conn.target,
+        protocol=proto_str,
+        username=conn.username,
+        password=conn.password,
+        tls_ca=sec.tls_ca if (sec and sec.tls_ca) else None,
+        tls_cert=sec.tls_cert if (sec and sec.tls_cert) else None,
+        tls_key=sec.tls_key if (sec and sec.tls_key) else None,
+        skip_verify=bool(sec.skip_verify) if sec else bool(conn.insecure),
+        insecure=bool(conn.insecure),
+        tls_server_name=sec.tls_server_name if (sec and getattr(sec, "tls_server_name", None)) else None,
+        tls_version=sec.tls_version if (sec and getattr(sec, "tls_version", None)) else None,
+        ssh_key=sec.ssh_key if (sec and getattr(sec, "ssh_key", None)) else None,
+    )
+
+    step_dtos = []
+    for op in session.operations:
+        if isinstance(op, CapabilitiesOperation):
+            step_dtos.append(OperationStepDTO(op_type="capabilities"))
+        elif isinstance(op, GetSchemaOperation):
+            step_dtos.append(OperationStepDTO(
+                op_type="get-schema",
+                paths=[op.identifier] if op.identifier else [],
+                options={"version": op.version, "format": op.format},
+            ))
+        elif isinstance(op, GetOperation):
+            is_filter = isinstance(op.selector, FilterSelector)
+            po = getattr(op, "protocol_options", None)
+            opts: Dict[str, Any] = {"read_scope": getattr(op, "read_scope", "all")}
+            if po is not None and hasattr(po, "encoding"):
+                opts["encoding"] = po.encoding
+            ds = "all"
+            if po is not None and hasattr(po, "source_datastore") and po.source_datastore:
+                ds = po.source_datastore
+            elif po is not None and hasattr(po, "source") and po.source:
+                ds = po.source
+            step_dtos.append(OperationStepDTO(
+                op_type="get_config" if isinstance(op, GetConfigOperation) or getattr(op, "read_scope", "") == "config" else "get",
+                paths=list(getattr(op.selector, "paths", ())) if not is_filter else [],
+                prefix=getattr(op.selector, "prefix", "") or None,
+                filter_expression=op.selector.expression if is_filter else None,
+                filter_type=op.selector.filter_type if is_filter else None,
+                datastore=ds,
+                options=opts,
+            ))
+        elif isinstance(op, SetOperation):
+            changes = [
+                MutationChangeDTO(
+                    path=c.path,
+                    value=c.value,
+                    operation=c.operation.value if hasattr(c.operation, "value") else str(c.operation).lower(),
+                    value_type=getattr(c, "type", None),
+                )
+                for c in op.changes
+            ]
+            opts = {}
+            xml_payload = None
+            ds = "all"
+            if hasattr(op, "protocol_options") and op.protocol_options:
+                po = op.protocol_options
+                if hasattr(po, "config") and po.config is not None:
+                    xml_payload = po.config
+                if hasattr(po, "target_datastore") and po.target_datastore:
+                    ds = po.target_datastore
+                for k in [
+                    "encoding",
+                    "default_operation",
+                    "test_option",
+                    "error_option",
+                    "lock_target",
+                    "validate_candidate",
+                    "commit",
+                    "confirmed",
+                    "confirm_timeout",
+                    "persist",
+                    "persist_id",
+                ]:
+                    if hasattr(po, k):
+                        opts[k] = getattr(po, k)
+            step_dtos.append(OperationStepDTO(
+                op_type="set",
+                datastore=ds,
+                changes=changes,
+                xml_payload=xml_payload,
+                prefix=op.prefix,
+                options=opts,
+            ))
+        elif isinstance(op, TransactionOperation):
+            tx_name = op.operation.value if hasattr(op.operation, "value") else str(op.operation).lower()
+            step_dtos.append(OperationStepDTO(
+                op_type=tx_name,
+                datastore=getattr(op, "target_datastore", "candidate"),
+                options={
+                    "source_datastore": getattr(op, "source_datastore", "candidate"),
+                    "confirmed": getattr(op, "confirmed", False),
+                    "confirm_timeout": getattr(op, "confirm_timeout", None),
+                    "persist": getattr(op, "persist", None),
+                    "persist_id": getattr(op, "persist_id", None),
+                },
+            ))
+        elif isinstance(op, SubscribeOperation):
+            is_filter = isinstance(op.selector, FilterSelector)
+            tel_policy = None
+            if hasattr(op, "delivery") and op.delivery:
+                del_mode_str = op.delivery.mode.value if hasattr(op.delivery.mode, "value") else str(op.delivery.mode).lower()
+                tel_policy = TelemetryPolicyDTO(
+                    mode=DeliveryModeDTO.from_string(del_mode_str),
+                    sample_interval_sec=getattr(op.delivery, "interval", 10.0),
+                    heartbeat_interval_sec=getattr(op.delivery, "heartbeat", None),
+                    suppress_redundant=getattr(op.delivery, "suppress_redundant", False),
+                )
+            sub_opts: Dict[str, Any] = {"subscription_name": getattr(op, "subscription_name", "sub")}
+            po = getattr(op, "protocol_options", None)
+            if po is not None:
+                for k in ["encoding", "updates_only", "stream_name", "start_time", "stop_time", "poll_timeout"]:
+                    if hasattr(po, k):
+                        sub_opts[k] = getattr(po, k)
+            step_dtos.append(OperationStepDTO(
+                op_type="subscribe",
+                paths=list(getattr(op.selector, "paths", ())) if not is_filter else [],
+                prefix=getattr(op.selector, "prefix", "") or None,
+                filter_expression=op.selector.expression if is_filter else None,
+                filter_type=op.selector.filter_type if is_filter else None,
+                telemetry=tel_policy,
+                options=sub_opts,
+            ))
+        else:
+            raise ValueError(f"Unsupported operation in SessionConfig: {op}")
+
+    schema_profile_id = None
+    schema_dirs = []
+    schema_cache_dir = None
+    schema_validate = False
+    schema_auto_discovery = True
+    schema_auto_fetch = True
+    if hasattr(session, "schema") and session.schema:
+        schema_profile_id = getattr(session.schema, "profile", None)
+        schema_dirs = [str(p) for p in getattr(session.schema, "yang_dirs", ())]
+        if getattr(session.schema, "cache_dir", None):
+            schema_cache_dir = str(session.schema.cache_dir)
+        schema_validate = bool(getattr(session.schema, "validate", False))
+        schema_auto_discovery = bool(getattr(session.schema, "auto_discovery", True))
+        schema_auto_fetch = bool(getattr(session.schema, "auto_fetch", True))
+
+    return ExecutionRequestDTO(
+        device_id=device_id,
+        adhoc_endpoint=adhoc,
+        protocol=adhoc.protocol,
+        operations=step_dtos,
+        schema_profile_id=schema_profile_id,
+        schema_dirs=schema_dirs,
+        schema_cache_dir=schema_cache_dir,
+        schema_validate=schema_validate,
+        schema_auto_discovery=schema_auto_discovery,
+        schema_auto_fetch=schema_auto_fetch,
+        timeout_seconds=session.execution.timeout if hasattr(session, "execution") and session.execution else 30,
+        times=session.execution.times if hasattr(session, "execution") and session.execution else 1,
+    )
+
+
+def execution_request_to_session(dto: Any, registry: Optional[Any] = None) -> SessionConfig:
+    """
+    Converts an external ExecutionRequestDTO to an internal SessionConfig.
+    Delegates to DeviceOperationService.
+    """
+    from application.operations import DeviceOperationService
+    op_svc = DeviceOperationService(device_registry=registry)
+    return op_svc.build_session_config(dto)
