@@ -176,3 +176,16 @@ class StreamEventDTO:
     is_sync_marker: bool = False
     error: Optional[str] = None
 
+
+def expand_request_repetitions(
+    requests: Sequence[ExecutionRequestDTO],
+) -> list[ExecutionRequestDTO]:
+    """Expands requests according to their .times repetition multiplier."""
+    expanded: list[ExecutionRequestDTO] = []
+    for req in requests:
+        repeat = max(getattr(req, "times", 1), 1)
+        for _ in range(repeat):
+            expanded.append(req)
+    return expanded
+
+

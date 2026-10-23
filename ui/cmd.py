@@ -354,6 +354,26 @@ def _parse_paired_options(args, group_type: str) -> List[Tuple[str, str]]:
     return results
 
 
+def _parse_cli_mutation_flags(args: Any, group_type: str) -> List[Tuple[str, str]]:
+    """Parses CLI mutation options (--update/--replace and paired options)."""
+    results: List[Tuple[str, str]] = []
+    raw_list = getattr(args, f"{group_type}s", []) or getattr(args, group_type, []) or []
+    for item in raw_list:
+        if isinstance(item, tuple):
+            results.append(item)
+        elif isinstance(item, str):
+            if ':::' in item:
+                p, v = item.split(':::', 1)
+                results.append((p.strip(), v.strip()))
+            elif '=' in item and not item.endswith(']'):
+                p, v = item.split('=', 1)
+                results.append((p.strip(), v.strip()))
+            else:
+                results.append((item.strip(), ""))
+    results.extend(_parse_paired_options(args, group_type))
+    return results
+
+
 class CLIConfigBuilder(ConfigBuilder):
     """
     Parsing all command-line arguments via argparse.
@@ -428,36 +448,8 @@ class CLIConfigBuilder(ConfigBuilder):
                     )
                 elif operation == 'set':
                     changes = []
-
-                    gnmi_updates = []
-                    for item in (getattr(self.args, "updates", []) or getattr(self.args, "update", []) or []):
-                        if isinstance(item, tuple):
-                            gnmi_updates.append(item)
-                        elif isinstance(item, str):
-                            if ':::' in item:
-                                p, v = item.split(':::', 1)
-                                gnmi_updates.append((p.strip(), v.strip()))
-                            elif '=' in item and not item.endswith(']'):
-                                p, v = item.split('=', 1)
-                                gnmi_updates.append((p.strip(), v.strip()))
-                            else:
-                                gnmi_updates.append((item.strip(), ""))
-                    gnmi_updates.extend(_parse_paired_options(self.args, 'update'))
-
-                    gnmi_replaces = []
-                    for item in (getattr(self.args, "replaces", []) or getattr(self.args, "replace", []) or []):
-                        if isinstance(item, tuple):
-                            gnmi_replaces.append(item)
-                        elif isinstance(item, str):
-                            if ':::' in item:
-                                p, v = item.split(':::', 1)
-                                gnmi_replaces.append((p.strip(), v.strip()))
-                            elif '=' in item and not item.endswith(']'):
-                                p, v = item.split('=', 1)
-                                gnmi_replaces.append((p.strip(), v.strip()))
-                            else:
-                                gnmi_replaces.append((item.strip(), ""))
-                    gnmi_replaces.extend(_parse_paired_options(self.args, 'replace'))
+                    gnmi_updates = _parse_cli_mutation_flags(self.args, 'update')
+                    gnmi_replaces = _parse_cli_mutation_flags(self.args, 'replace')
 
                     raw_deletes = getattr(self.args, "delete", []) or getattr(self.args, "deletes", []) or []
                     if isinstance(raw_deletes, str):
@@ -936,6 +928,35 @@ def parse_operation_item(op_item: Any, protocol: Protocol = Protocol.NETCONF) ->
         )
 
 
+def _normalize_mutation_entries(raw_input: Any) -> List[Tuple[str, str]]:
+    """Normalizes dict, list of tuples, list of strings, or scalar mutation entries."""
+    if not raw_input:
+        return []
+    if isinstance(raw_input, dict):
+        return [(str(k), str(v)) for k, v in raw_input.items()]
+    items = raw_input if isinstance(raw_input, list) else [raw_input]
+    results: List[Tuple[str, str]] = []
+    for item in items:
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            results.append((str(item[0]), str(item[1])))
+        elif isinstance(item, dict):
+            results.extend((str(k), str(v)) for k, v in item.items())
+        elif isinstance(item, str) and ':::' in item:
+            p, v = item.split(':::', 1)
+            results.append((p.strip(), v.strip()))
+        elif item:
+            results.append((str(item), ""))
+    return results
+
+
+def _normalize_delete_entries(raw_input: Any) -> List[str]:
+    """Normalizes delete entries from list or single string."""
+    if not raw_input:
+        return []
+    items = raw_input if isinstance(raw_input, list) else [raw_input]
+    return [str(d).strip() for d in items if d]
+
+
 class FileConfigBuilder(ConfigBuilder):
     """
     Parse YAML formatted configure file. It may be protocol-specific.
@@ -1281,74 +1302,16 @@ class FileConfigBuilder(ConfigBuilder):
                     if t_set_block and isinstance(t_set_block, dict):
                         set_prefix = t_set_block.get('prefix', set_prefix)
                         set_encoding = t_set_block.get('encoding', set_encoding)
-
-                        upd_val = t_set_block.get('update', {})
-                        if isinstance(upd_val, dict):
-                            updates.extend(list(upd_val.items()))
-                        elif isinstance(upd_val, list):
-                            for item in upd_val:
-                                if isinstance(item, (tuple, list)) and len(item) == 2:
-                                    updates.append(tuple(item))
-                                elif isinstance(item, dict):
-                                    updates.extend(list(item.items()))
-                                elif isinstance(item, str) and ':::' in item:
-                                    p, v = item.split(':::', 1)
-                                    updates.append((p.strip(), v.strip()))
-                                else:
-                                    updates.append((item, ""))
-
-                        rep_val = t_set_block.get('replace', {})
-                        if isinstance(rep_val, dict):
-                            replaces.extend(list(rep_val.items()))
-                        elif isinstance(rep_val, list):
-                            for item in rep_val:
-                                if isinstance(item, (tuple, list)) and len(item) == 2:
-                                    replaces.append(tuple(item))
-                                elif isinstance(item, dict):
-                                    replaces.extend(list(item.items()))
-                                elif isinstance(item, str) and ':::' in item:
-                                    p, v = item.split(':::', 1)
-                                    replaces.append((p.strip(), v.strip()))
-                                else:
-                                    replaces.append((item, ""))
-
-                        del_val = t_set_block.get('delete', [])
-                        if isinstance(del_val, str):
-                            deletes.append(del_val)
-                        elif isinstance(del_val, list):
-                            deletes.extend(del_val)
+                        updates.extend(_normalize_mutation_entries(t_set_block.get('update')))
+                        replaces.extend(_normalize_mutation_entries(t_set_block.get('replace')))
+                        deletes.extend(_normalize_delete_entries(t_set_block.get('delete')))
 
                     if t_update_list:
-                        items = t_update_list if isinstance(t_update_list, list) else [t_update_list]
-                        for item in items:
-                            if isinstance(item, (tuple, list)) and len(item) == 2:
-                                updates.append(tuple(item))
-                            elif isinstance(item, dict):
-                                updates.extend(list(item.items()))
-                            elif isinstance(item, str) and ':::' in item:
-                                p, v = item.split(':::', 1)
-                                updates.append((p.strip(), v.strip()))
-                            else:
-                                updates.append((item, ""))
-
+                        updates.extend(_normalize_mutation_entries(t_update_list))
                     if t_replace_list:
-                        items = t_replace_list if isinstance(t_replace_list, list) else [t_replace_list]
-                        for item in items:
-                            if isinstance(item, (tuple, list)) and len(item) == 2:
-                                replaces.append(tuple(item))
-                            elif isinstance(item, dict):
-                                replaces.extend(list(item.items()))
-                            elif isinstance(item, str) and ':::' in item:
-                                p, v = item.split(':::', 1)
-                                replaces.append((p.strip(), v.strip()))
-                            else:
-                                replaces.append((item, ""))
-
+                        replaces.extend(_normalize_mutation_entries(t_replace_list))
                     if t_delete_list:
-                        if isinstance(t_delete_list, str):
-                            deletes.append(t_delete_list)
-                        elif isinstance(t_delete_list, list):
-                            deletes.extend(t_delete_list)
+                        deletes.extend(_normalize_delete_entries(t_delete_list))
 
                     changes = []
                     for p, v in updates:

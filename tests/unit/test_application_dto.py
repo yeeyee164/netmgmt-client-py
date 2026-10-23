@@ -129,3 +129,30 @@ class TestStreamEventDTO:
         assert ev.is_sync_marker is True
         assert ev.error is None
 
+
+class TestExpandRequestRepetitions:
+    def test_expand_empty_list(self):
+        from application.dto import expand_request_repetitions
+        assert expand_request_repetitions([]) == []
+
+    def test_expand_multipliers(self):
+        from application.dto import expand_request_repetitions
+        req1 = ExecutionRequestDTO(
+            adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.1:57400", protocol="gnmi"),
+            times=3,
+        )
+        req2 = ExecutionRequestDTO(
+            adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.2:830", protocol="netconf"),
+            times=1,
+        )
+        req3 = ExecutionRequestDTO(
+            adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.3:57400", protocol="gnmi"),
+            times=0,  # should default to 1
+        )
+        expanded = expand_request_repetitions([req1, req2, req3])
+        assert len(expanded) == 5
+        assert expanded[:3] == [req1, req1, req1]
+        assert expanded[3] == req2
+        assert expanded[4] == req3
+
+

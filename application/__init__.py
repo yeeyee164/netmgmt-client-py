@@ -22,6 +22,7 @@ from application.dto import (
     StepResultDTO,
     ExecutionResultDTO,
     StreamEventDTO,
+    expand_request_repetitions,
 )
 from application.devices import DeviceRegistryService
 from application.operations import DeviceOperationService
@@ -46,6 +47,7 @@ __all__ = [
     "StepResultDTO",
     "ExecutionResultDTO",
     "StreamEventDTO",
+    "expand_request_repetitions",
     # Services
     "DeviceRegistryService",
     "DeviceOperationService",

@@ -18,6 +18,7 @@ from application.dto import (
     OperationStepDTO,
     StepResultDTO,
     SupportedProtocol,
+    expand_request_repetitions,
 )
 from application.devices import DeviceRegistryService
 from application.schemas import SchemaCatalogService
@@ -308,12 +309,14 @@ class DeviceOperationService:
             )
         return PathSelector(paths=tuple(step.paths), prefix=step.prefix or "")
 
-    def _resolve_worker(self, session_cfg: SessionConfig) -> BaseUnaryWorker:
+    @classmethod
+    def resolve_worker(cls, session_cfg: Any) -> BaseUnaryWorker:
         """Instantiates the matching worker instance for the session."""
-        if len(session_cfg.operations) > 1:
+        operations = getattr(session_cfg, "operations", ())
+        if len(operations) > 1:
             return SequentialWorker(config=session_cfg)
 
-        op = session_cfg.operations[0]
+        op = operations[0] if len(operations) == 1 else getattr(session_cfg, "operation", None)
         if isinstance(op, (GetOperation, GetSchemaOperation)):
             return GetWorker(config=session_cfg)
         elif isinstance(op, SetOperation):
@@ -322,7 +325,13 @@ class DeviceOperationService:
             return CapabilityWorker(config=session_cfg)
         elif isinstance(op, TransactionOperation):
             return TransactionWorker(config=session_cfg)
-        return SequentialWorker(config=session_cfg)
+        elif len(operations) == 0 and op is None:
+            return SequentialWorker(config=session_cfg)
+        raise ValueError(f"Unsupported unary operation: {op}")
+
+    def _resolve_worker(self, session_cfg: Any) -> BaseUnaryWorker:
+        """Instance delegation for resolve_worker (maintains compatibility with mocks)."""
+        return self.resolve_worker(session_cfg)
 
     def execute_unary(
         self,
@@ -413,11 +422,7 @@ class DeviceOperationService:
         Executes multiple ExecutionRequestDTOs concurrently using a ThreadPoolExecutor.
         Respects `request.times` repetition multipliers and routes outputs to optional handlers.
         """
-        expanded_requests: List[ExecutionRequestDTO] = []
-        for req in requests:
-            repeat = max(getattr(req, "times", 1), 1)
-            for _ in range(repeat):
-                expanded_requests.append(req)
+        expanded_requests = expand_request_repetitions(requests)
 
         if not expanded_requests:
             logger.warning("[DeviceOperationService] No unary requests to execute.")

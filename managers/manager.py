@@ -1,15 +1,4 @@
 import warnings
-
-warnings.warn(
-    """
-    This module has been deprecated. But you can still use it for
-    build some requests simply.
-
-    But I recommend to use `CLIApplicationRunner` or `DeviceOperationService`/`SubscriptionService` instead.
-    """,
-    DeprecationWarning,
-    stacklevel=2,
-)
 import time
 import threading
 import queue
@@ -51,6 +40,12 @@ class BaseRPCManager:
         debug: bool = False,
         cfg: Optional[Any] = None
     ):
+        warnings.warn(
+            "RPC Managers are deprecated. Use CLIApplicationRunner or "
+            "DeviceOperationService/SubscriptionService instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if cfg is not None:
             self.session_configs = sessions if sessions is not None else cfg.sessions
             self.debug = cfg.debug
@@ -122,38 +117,6 @@ class SubscriptionManager(BaseRPCManager):
         finally:
             self.shutdown()
 
-    def _interactive_poll_controller(self):
-        """A simple background CLI to allow users to trigger polls manually."""
-        poll_sessions = [
-            s for s in self.sessions
-            if (getattr(s, 'is_poll_mode', lambda: False)() or getattr(s, 'kwargs', {}).get('mode', '').lower() == 'poll')
-        ]
-        time.sleep(2)
-        
-        while True:
-            print("\n" + "="*40)
-            print(" Interactive POLL Controller")
-            print("="*40)
-            for idx, s in enumerate(poll_sessions):
-                print(f"  [{idx}] {s.session_id} - {s.target_ip} ({s.subscription_name})")
-            
-            try:
-                choice = input("\nType a session index to trigger, 'all', or press Enter to refresh: ").strip().lower()
-                if choice == 'all':
-                    for s in poll_sessions:
-                        s.trigger_poll()
-                        print(f"-> Sent POLL to {s.session_id}")
-                elif choice.isdigit():
-                    idx = int(choice)
-                    if 0 <= idx < len(poll_sessions):
-                        poll_sessions[idx].trigger_poll()
-                        print(f"-> Sent POLL to {poll_sessions[idx].session_id}")
-                    else:
-                        print("Invalid index.")
-            except EOFError:
-                break
-            except KeyboardInterrupt:
-                break       
 
 class UnaryManager(BaseRPCManager):
     """
@@ -180,21 +143,8 @@ class UnaryManager(BaseRPCManager):
         if self.worker_class is not None:
             return self.worker_class(config=sc)
 
-        operations = getattr(sc, 'operations', ())
-        if len(operations) > 1:
-            return SequentialWorker(config=sc)
-
-        op = operations[0] if len(operations) == 1 else getattr(sc, 'operation', None)
-        if isinstance(op, (GetOperation, GetSchemaOperation)):
-            return GetWorker(config=sc)
-        elif isinstance(op, SetOperation):
-            return SetWorker(config=sc)
-        elif isinstance(op, CapabilitiesOperation):
-            return CapabilityWorker(config=sc)
-        elif isinstance(op, TransactionOperation):
-            return TransactionWorker(config=sc)
-        else:
-            raise ValueError(f"Unsupported unary operation: {op}")
+        from application.operations import DeviceOperationService
+        return DeviceOperationService.resolve_worker(sc)
 
     def build_sessions(self):
         for sc in self.session_configs:

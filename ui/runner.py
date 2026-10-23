@@ -12,7 +12,7 @@ import time
 from typing import Any, List, Optional, Sequence
 
 from application.devices import DeviceRegistryService
-from application.dto import ExecutionRequestDTO, ExecutionResultDTO
+from application.dto import ExecutionRequestDTO, ExecutionResultDTO, expand_request_repetitions
 from application.operations import DeviceOperationService
 from application.subscriptions import SubscriptionService
 from modules.output import OutputHandler
@@ -46,11 +46,7 @@ class CLIStreamRunner:
         Starts streaming subscriptions for the given requests and blocks until completion
         or KeyboardInterrupt, routing received telemetry events to output_handlers.
         """
-        expanded_requests: List[ExecutionRequestDTO] = []
-        for req in requests:
-            repeat = max(getattr(req, "times", 1), 1)
-            for _ in range(repeat):
-                expanded_requests.append(req)
+        expanded_requests = expand_request_repetitions(requests)
 
         if not expanded_requests:
             logger.error("[CLIStreamRunner] No valid subscription requests to start. Exiting.")
