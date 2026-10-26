@@ -34,12 +34,18 @@ Data flow
 [ CLI Input / YAML Config ] (ParsedConfig)
             │
             ▼
+            │
        [ ui/cmd.py ]  ──────────> Creates [ SessionConfig ] (SessionConfig in {ConnectionConfig, ExecutionConfig, OperationConfig})[for each operation and defined RPCs]
             │
             ▼
-   [ ManagerFactory ]
-        ├── UnaryManager            ───> Spawns Worker Threads [ GetWorker / SetWorker / CapabilitiesWorker / SequentialWorker ]
-        └── SubscriptionManager     ───> Spawns Worker Threads [ SubscribeSession ]
+            │
+       [ ui/cmd.py ]  ──────────> Construct `DeviceOperationService` and `SubscriptionService` (see `Application Services Layer`)
+            │
+            ▼
+            │
+     [ ui/runner.py ]  ──────────> Creates one of runners(`CLIApplicationRunner`, `CLIStreamRunner`) using `DTO`
+        ├── CLIApplicationRunner  ───> Spawns Worker Threads [ GetWorker / SetWorker / CapabilitiesWorker / SequentialWorker ]
+        └── CLIStreamRunner       ───> Spawns Worker Threads [ SubscribeSession ]
                                                 │
                                                 ▼
                                         [ ClientFactory ]
@@ -53,6 +59,49 @@ Data flow
 
 Architecture Decoupling
 =======================
+
+Application Services Layer
+--------
+
+
+### DTO(Data Transfer Object)s
+
+This is a kind of presentation layer that gives means of forwarding information between upper and lower layer.
+* By defining DTO(Data Transfer Object)s, this layer can express one or more northbound protocols.
+* It has similar information which defined at `config`, but used between layers.
+
+Upper layer containes defined interfaces — Command-line arguments, YAML, and so on.
+
+Lower layer implements actual northbound-protocol operations.
+* Defined `Workers` proceed desired operation based of given information from Application Services Layer.
+
+#### Supported DTOs
+
+Name | Represents 
+-------------------|------
+`DeliveryModeDTO` | Methods of streaming 
+`TelemetryPolicyDTO` | Configuration of streaming 
+`MutationChangeDTO` | How to set data 
+`AdhocEndpointDTO` | `ParsedConfig` from `cmd.py`
+`OperationStepDTO` | RPC Operations 
+`ExecutionRequestDTO` | Forwarding rules 
+`StepResultDTO` | Operation output  
+`ExecutionResultDTO` | Result of an operation 
+`StreamEventDTO` | Streaming(or event) output 
+
+### Services
+
+Application Services Layer has couple of services for operating protoocols. All services return `ExecutionResultDTO` as result of protocol operation.
+
+#### Supported Services
+
+Name | Description | Used for
+-------------------|------|---------------
+`DeviceOperationService` | Application service executing unary requests against network devices. | "Unary" Operations
+`SubscriptionService` | Stateful application service managing streaming telemetry subscriptions.  | "Stream" Operations
+`DeviceRegistryService` |Thread-safe registry for known network device profiles. | The runner of services described above
+`SchemaCatalogService` | Application-level facade bridging to the core YANG schema engine and SQLite database. | Schema management
+
 
 
 Workers
@@ -82,7 +131,7 @@ Outputs
 
 ```text
 
-                [ SessionConfig ] * (no of requests)
+               ExecutionResultDTO / StreamEvent
                                 │
                   message(Dict)={protocol:, ...}
                                 │
@@ -102,7 +151,7 @@ Outputs
    prints to terminal     prints to file           creates SYSLOG Client(IP, PORT)
                                                           │
                                                           ▼
-                                                    pust data into server
+                                                    push data into server
 
 ```
 
@@ -133,4 +182,14 @@ Phase 1:
 Phase 2:
 * Refactor protocol configuration.
 * Supports NETCONF `<edit-config>` RPC.
-* Supports NETCONF `<edit-config>` RPC with operations.
+
+Phase 3:
+* Support transactional Operations defined at RFC 6022.
+* Support sequential Operations(YAML)
+
+Phase 4:
+* Define managing/handling schema information at `./core` directory
+* Support request validation
+
+Phase 5:
+* Support Netconf Event notification(RFC5277)

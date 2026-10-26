@@ -2,6 +2,9 @@
 
 ## 1. Overview
 
+> [!NOTE]
+> `manager.py` has been deprecated. For CLI/YAML users, please use classes defined at `ui/runner.py` instead.
+
 The [`managers/`](__init__.py) package provides the concurrency, worker lifecycle, and orchestration engine for **`netmgnt-client-py`**. It acts as the bridge between declarative [`SessionConfig`](../config/model.py) instances and protocol-specific clients in [`specs/`](../specs/).
 
 The layer cleanly separates execution into two concurrency models:
