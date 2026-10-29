@@ -35,7 +35,7 @@ class CLIStreamRunner:
         self.subscription_service = subscription_service or SubscriptionService(
             device_registry=device_registry
         )
-        self.data_queue: queue.Queue = queue.Queue()
+        self.data_queue: queue.Queue = queue.Queue(maxsize=1000)
 
     def run(
         self,

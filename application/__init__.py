@@ -26,7 +26,7 @@ from application.dto import (
 )
 from application.devices import DeviceRegistryService
 from application.operations import DeviceOperationService
-from application.subscriptions import SubscriptionService
+from application.subscriptions import SubscriptionService, SubscriptionState
 from application.schemas import SchemaCatalogService
 
 __all__ = [
@@ -52,6 +52,7 @@ __all__ = [
     "DeviceRegistryService",
     "DeviceOperationService",
     "SubscriptionService",
+    "SubscriptionState",
     "SchemaCatalogService",
 ]
 

@@ -149,10 +149,13 @@ class TestExpandRequestRepetitions:
             adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.3:57400", protocol="gnmi"),
             times=0,  # should default to 1
         )
+        import dataclasses
         expanded = expand_request_repetitions([req1, req2, req3])
         assert len(expanded) == 5
-        assert expanded[:3] == [req1, req1, req1]
+        req1_single = dataclasses.replace(req1, times=1)
+        assert expanded[:3] == [req1_single, req1_single, req1_single]
         assert expanded[3] == req2
         assert expanded[4] == req3
+        assert all(r.times == 1 for r in expanded)
 
 

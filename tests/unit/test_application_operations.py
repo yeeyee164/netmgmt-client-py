@@ -361,3 +361,39 @@ class TestDeviceOperationServiceExecuteBatch:
         assert results[1].success is False
         assert "Connection refused" in results[1].error_summary
 
+    def test_execute_unary_device_not_found_returns_structured_error(self):
+        svc = DeviceOperationService()
+        req = ExecutionRequestDTO(
+            device_id="non-existent-device-id",
+            protocol="gnmi",
+            operations=[OperationStepDTO(op_type="capabilities")],
+        )
+        res = svc.execute_unary(req)
+        assert res.success is False
+        assert "not registered" in res.error_summary.lower()
+        assert len(res.results) == 1
+        assert res.results[0].op_type == "error"
+
+    @patch.object(DeviceOperationService, "_resolve_worker")
+    def test_execute_unary_respects_times_multiplier(self, mock_resolve):
+        mock_worker = MagicMock()
+        mock_worker.start.return_value = {
+            "session_id": "s1",
+            "target": "10.0.0.1:57400",
+            "rpc": "capability",
+            "data": {"gnmi_version": "0.8.0"},
+            "protocol": "gnmi",
+        }
+        mock_resolve.return_value = mock_worker
+
+        svc = DeviceOperationService()
+        req = ExecutionRequestDTO(
+            adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.1:57400", protocol="gnmi"),
+            operations=[OperationStepDTO(op_type="capabilities")],
+            times=3,
+        )
+        res = svc.execute_unary(req)
+        assert res.success is True
+        assert len(res.results) == 3
+        assert mock_worker.start.call_count == 3
+

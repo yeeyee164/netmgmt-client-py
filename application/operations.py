@@ -22,7 +22,12 @@ from application.dto import (
 )
 from application.devices import DeviceRegistryService
 from application.schemas import SchemaCatalogService
-from application.exceptions import InvalidRequestError
+from application.exceptions import (
+    ApplicationError,
+    InvalidRequestError,
+    UnsupportedProtocolError,
+    DeviceNotFoundError,
+)
 
 from config.model import SessionConfig, ConnectionConfig, ExecutionConfig, Protocol
 from config.schema import SchemaConfig
@@ -111,7 +116,7 @@ class DeviceOperationService:
         execution = ExecutionConfig(
             timeout=request.timeout_seconds,
             retry_count=1,
-            times=max(request.times, 1),
+            times=1,  # Repetition multiplier is handled authoritatively by Application Service Layer
         )
 
         # Schema Config
@@ -343,74 +348,112 @@ class DeviceOperationService:
         Executes a unary request pipeline.
         Returns a structured ExecutionResultDTO without requiring terminal/file sinks.
         """
-        start_time = time.perf_counter()
-        endpoint = self._registry.resolve_endpoint(request)
-
-        # Pre-flight schema validation only mode
-        if request.validate_only:
-            val_errors = self._schema_service.validate_request_schema(request)
-            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-            if val_errors:
+        # If request requested repetition, delegate to execute_batch and aggregate results
+        if getattr(request, "times", 1) > 1:
+            batch_results = self.execute_batch([request], output_handlers=output_handlers or ([output_handler] if output_handler else None))
+            if batch_results:
+                combined_steps: List[StepResultDTO] = []
+                all_success = True
+                errors: List[str] = []
+                total_ms = 0.0
+                for r in batch_results:
+                    combined_steps.extend(r.results)
+                    if not r.success:
+                        all_success = False
+                    if r.error_summary:
+                        errors.append(r.error_summary)
+                    total_ms += r.execution_time_ms
                 return ExecutionResultDTO(
-                    target=endpoint.target,
-                    protocol=endpoint.protocol,
-                    success=False,
-                    results=[StepResultDTO(op_type="validate", success=False, error=e) for e in val_errors],
-                    error_summary="; ".join(val_errors),
+                    target=batch_results[0].target,
+                    protocol=batch_results[0].protocol,
+                    success=all_success,
+                    results=combined_steps,
+                    error_summary="; ".join(errors) if errors else None,
+                    execution_time_ms=total_ms,
+                )
+
+        start_time = time.perf_counter()
+        target_str = request.adhoc_endpoint.target if request.adhoc_endpoint else (request.device_id or "unknown")
+        proto_str = request.protocol or (request.adhoc_endpoint.protocol if request.adhoc_endpoint else "unknown")
+
+        try:
+            endpoint = self._registry.resolve_endpoint(request)
+            target_str = endpoint.target
+            proto_str = endpoint.protocol
+
+            # Pre-flight schema validation only mode
+            if request.validate_only:
+                val_errors = self._schema_service.validate_request_schema(request)
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                if val_errors:
+                    return ExecutionResultDTO(
+                        target=target_str,
+                        protocol=proto_str,
+                        success=False,
+                        results=[StepResultDTO(op_type="validate", success=False, error=e) for e in val_errors],
+                        error_summary="; ".join(val_errors),
+                        execution_time_ms=elapsed_ms,
+                    )
+                return ExecutionResultDTO(
+                    target=target_str,
+                    protocol=proto_str,
+                    success=True,
+                    results=[StepResultDTO(op_type="validate", success=True, data="Schema validation succeeded")],
                     execution_time_ms=elapsed_ms,
                 )
+
+            # Build domain SessionConfig
+            session_cfg = self.build_session_config(request)
+            worker = self._resolve_worker(session_cfg)
+
+            handlers: List[OutputHandler] = []
+            if output_handler is not None:
+                handlers.append(output_handler)
+            if output_handlers is not None:
+                for h in output_handlers:
+                    if h not in handlers:
+                        handlers.append(h)
+
+            raw_result = worker.start()
+
+            # Optional CLI sink invocation
+            if handlers and raw_result:
+                items = raw_result if isinstance(raw_result, list) else [raw_result]
+                with self._output_lock:
+                    for item in items:
+                        if isinstance(item, dict):
+                            for h in handlers:
+                                h.write(item)
+
+            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+            return self._format_execution_result(
+                raw_result=raw_result,
+                target=target_str,
+                protocol=proto_str,
+                elapsed_ms=elapsed_ms,
+            )
+        except ApplicationError as app_err:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+            logger.error(f"[DeviceOperationService {target_str}] Application error: {app_err}")
             return ExecutionResultDTO(
-                target=endpoint.target,
-                protocol=endpoint.protocol,
-                success=True,
-                results=[StepResultDTO(op_type="validate", success=True, data="Schema validation succeeded")],
+                target=target_str,
+                protocol=proto_str,
+                success=False,
+                results=[StepResultDTO(op_type="error", success=False, error=str(app_err))],
+                error_summary=str(app_err),
                 execution_time_ms=elapsed_ms,
             )
-
-        # Build domain SessionConfig
-        session_cfg = self.build_session_config(request)
-        worker = self._resolve_worker(session_cfg)
-
-        handlers: List[OutputHandler] = []
-        if output_handler is not None:
-            handlers.append(output_handler)
-        if output_handlers is not None:
-            for h in output_handlers:
-                if h not in handlers:
-                    handlers.append(h)
-
-        # Execute worker directly via .start()
-        try:
-            raw_result = worker.start()
         except Exception as exc:
-            worker_name = worker.__class__.__name__
-            logger.error(f"[{worker_name} {endpoint.target}] generated an exception: {exc}")
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+            logger.error(f"[DeviceOperationService {target_str}] Unexpected error: {exc}", exc_info=True)
             return ExecutionResultDTO(
-                target=endpoint.target,
-                protocol=endpoint.protocol,
+                target=target_str,
+                protocol=proto_str,
                 success=False,
                 results=[StepResultDTO(op_type="error", success=False, error=str(exc))],
                 error_summary=str(exc),
                 execution_time_ms=elapsed_ms,
             )
-
-        # Optional CLI sink invocation
-        if handlers and raw_result:
-            items = raw_result if isinstance(raw_result, list) else [raw_result]
-            with self._output_lock:
-                for item in items:
-                    if isinstance(item, dict):
-                        for h in handlers:
-                            h.write(item)
-
-        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-        return self._format_execution_result(
-            raw_result=raw_result,
-            target=endpoint.target,
-            protocol=endpoint.protocol,
-            elapsed_ms=elapsed_ms,
-        )
 
     def execute_batch(
         self,

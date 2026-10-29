@@ -142,6 +142,10 @@ class ExecutionRequestDTO:
             raise InvalidRequestError("ExecutionRequestDTO requires either 'device_id' or 'adhoc_endpoint'.")
         if self.protocol is not None:
             self.protocol = SupportedProtocol.from_string(self.protocol).value
+        if self.timeout_seconds <= 0:
+            raise InvalidRequestError("ExecutionRequestDTO 'timeout_seconds' must be positive.")
+        if self.times <= 0:
+            self.times = 1
 
 
 @dataclass(kw_only=True)
@@ -180,12 +184,14 @@ class StreamEventDTO:
 def expand_request_repetitions(
     requests: Sequence[ExecutionRequestDTO],
 ) -> list[ExecutionRequestDTO]:
-    """Expands requests according to their .times repetition multiplier."""
+    """Expands requests according to their .times repetition multiplier into single-run DTOs."""
+    import dataclasses
     expanded: list[ExecutionRequestDTO] = []
     for req in requests:
         repeat = max(getattr(req, "times", 1), 1)
         for _ in range(repeat):
-            expanded.append(req)
+            cloned = dataclasses.replace(req, times=1)
+            expanded.append(cloned)
     return expanded
 
 

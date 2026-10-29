@@ -2,7 +2,7 @@
 from unittest.mock import MagicMock, patch
 import pytest
 
-from application.subscriptions import SubscriptionService
+from application.subscriptions import SubscriptionService, SubscriptionState
 from application.dto import (
     AdhocEndpointDTO,
     ExecutionRequestDTO,
@@ -122,4 +122,49 @@ class TestSubscriptionService:
 
         sub_svc.stop_all()
         assert len(sub_svc.list_active_subscriptions()) == 0
+
+    @patch("application.subscriptions.SubscribeSession")
+    def test_full_uuid_subscription_id_format(self, mock_session_cls):
+        mock_worker = MagicMock()
+        mock_worker.is_running = True
+        mock_session_cls.return_value = mock_worker
+
+        sub_svc = SubscriptionService()
+        req = ExecutionRequestDTO(
+            adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.1:57400", protocol="gnmi"),
+            operations=[OperationStepDTO(op_type="subscribe", paths=["/interfaces"])],
+        )
+        sub_id = sub_svc.start_subscription(req)
+        assert len(sub_id) == 36
+        assert sub_id.count("-") == 4
+
+    @patch("application.subscriptions.SubscribeSession")
+    def test_subscription_state_transitions_and_generator_termination(self, mock_session_cls):
+        mock_worker = MagicMock()
+        mock_worker.is_running = True
+        mock_session_cls.return_value = mock_worker
+
+        sub_svc = SubscriptionService()
+        req = ExecutionRequestDTO(
+            adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.1:57400", protocol="gnmi"),
+            operations=[OperationStepDTO(op_type="subscribe", paths=["/interfaces"])],
+        )
+        sub_id = sub_svc.start_subscription(req)
+        info = sub_svc.get_subscription_info(sub_id)
+        assert info["state"] in (SubscriptionState.STARTING.value, SubscriptionState.RUNNING.value)
+
+        # Simulate thread termination and worker completion
+        managed = sub_svc._get_managed(sub_id)
+        managed.thread = MagicMock()
+        managed.thread.is_alive.return_value = False
+        mock_worker.is_running = False
+
+        # is_alive should immediately synchronize to False
+        assert managed.is_alive is False
+        assert managed.state == SubscriptionState.STOPPED
+
+        # Generator terminates instead of looping indefinitely
+        gen = sub_svc.consume_events_generator(sub_id, timeout=0.01)
+        items = list(gen)
+        assert len(items) == 0
 

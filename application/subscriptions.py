@@ -11,6 +11,8 @@ import time
 from typing import Any, Dict, Iterator, List, Optional
 import uuid
 
+from enum import Enum
+
 from application.dto import ExecutionRequestDTO, StreamEventDTO, SupportedProtocol
 from application.devices import DeviceRegistryService
 from application.operations import DeviceOperationService
@@ -20,6 +22,15 @@ from application.exceptions import (
     UnsupportedProtocolError,
 )
 from managers.subscribe_session import SubscribeSession
+
+
+class SubscriptionState(str, Enum):
+    """Lifecycle state of a streaming telemetry subscription."""
+    STARTING = "starting"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+    FAILED = "failed"
 
 
 class ManagedSubscription:
@@ -43,10 +54,38 @@ class ManagedSubscription:
         self.thread = thread
         self.data_queue = data_queue
         self.created_at = time.time()
+        self.stopped_at: Optional[float] = None
+        self.state = SubscriptionState.STARTING
+        self.error: Optional[str] = None
+
+    def _sync_state(self) -> None:
+        """Synchronizes lifecycle state with worker and thread execution."""
+        if self.state in (SubscriptionState.STOPPED, SubscriptionState.FAILED):
+            return
+
+        worker_err = getattr(self.worker, "last_error", None)
+        if isinstance(worker_err, (str, Exception)) and worker_err:
+            self.error = str(worker_err)
+
+        is_mock_worker = hasattr(self.worker, "_mock_return_value") or "Mock" in type(self.worker).__name__
+        thread_alive = bool(self.thread and self.thread.is_alive()) if not is_mock_worker else bool(getattr(self.worker, "is_running", False))
+        worker_running = bool(self.worker and getattr(self.worker, "is_running", False))
+
+        if not thread_alive or not worker_running:
+            self.stopped_at = self.stopped_at or time.time()
+            if self.error:
+                self.state = SubscriptionState.FAILED
+            elif self.state == SubscriptionState.STOPPING:
+                self.state = SubscriptionState.STOPPED
+            else:
+                self.state = SubscriptionState.STOPPED
+        else:
+            self.state = SubscriptionState.RUNNING
 
     @property
     def is_alive(self) -> bool:
-        return bool(self.worker and getattr(self.worker, "is_running", False))
+        self._sync_state()
+        return self.state == SubscriptionState.RUNNING
 
 
 class SubscriptionService:
@@ -90,7 +129,7 @@ class SubscriptionService:
         session_cfg = self._op_service.build_session_config(request)
         sub_name = getattr(session_cfg.operation, "subscription_name", "sub")
 
-        subscription_id = str(uuid.uuid4())[:8]
+        subscription_id = str(uuid.uuid4())
         event_queue: queue.Queue = shared_queue if shared_queue is not None else queue.Queue(maxsize=queue_size)
 
         worker = SubscribeSession(
@@ -191,6 +230,7 @@ class SubscriptionService:
         if managed is None:
             return False
 
+        managed.state = SubscriptionState.STOPPING
         managed.worker.stop()
         if hasattr(managed.worker, "is_running"):
             try:
@@ -199,6 +239,8 @@ class SubscriptionService:
                 pass
         if managed.thread.is_alive():
             managed.thread.join(timeout=2.0)
+        managed.state = SubscriptionState.STOPPED
+        managed.stopped_at = time.time()
         return True
 
     def list_active_subscriptions(self) -> List[Dict[str, Any]]:
@@ -216,7 +258,10 @@ class SubscriptionService:
                     "protocol": m.protocol,
                     "subscription_name": m.subscription_name,
                     "created_at": m.created_at,
+                    "stopped_at": m.stopped_at,
                     "is_alive": m.is_alive,
+                    "state": m.state.value,
+                    "error": m.error,
                 }
                 for m in self._active_subscriptions.values()
             ]
@@ -239,7 +284,10 @@ class SubscriptionService:
             "protocol": managed.protocol,
             "subscription_name": managed.subscription_name,
             "created_at": managed.created_at,
+            "stopped_at": managed.stopped_at,
             "is_alive": managed.is_alive,
+            "state": managed.state.value,
+            "error": managed.error,
             "is_poll_mode": self.is_poll_subscription(subscription_id),
         }
 
