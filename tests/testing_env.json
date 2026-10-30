@@ -6,10 +6,24 @@
         },
         "protocols": {
             "netconf" : "172.20.20.2:830",
-            "gnmi" : "172.20.20.2:57400"
+            "gnmi" : "172.20.20.2:57401"
         },
         "yang": { 
             "yang_path" : "../yang/srlinux",
+            "yang_module" : ["openconfig-interfaces", "openconfig-system"],
+            "timeout" : 15
+        }
+    },
+    "ceos": {
+        "credentials" : {
+            "user" : "admin",
+            "password" : "admin"
+        },
+        "protocols": {
+            "gnmi" : "172.20.20.3:6030"
+        },
+        "yang": { 
+            "yang_path" : "../yang/ceos",
             "yang_module" : ["openconfig-interfaces", "openconfig-system"],
             "timeout" : 15
         }

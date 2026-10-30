@@ -65,7 +65,12 @@ logger = logging.getLogger(__name__)
 class DeviceOperationService:
     """
     Application service executing unary requests against network devices.
-    Decoupled from CLI argument parsing and terminal presentation sinks.
+
+    Decoupled from CLI argument parsing and terminal/file presentation sinks.
+    Translates high-level `ExecutionRequestDTO` instances into internal `SessionConfig` domain
+    models, dispatches them to appropriate unary worker engines (`GetWorker`, `SetWorker`,
+    `CapabilityWorker`, `TransactionWorker`, `SequentialWorker`), and returns structured
+    `ExecutionResultDTO` instances with stable error codes and per-step diagnostics.
     """
 
     def __init__(
@@ -73,12 +78,33 @@ class DeviceOperationService:
         device_registry: Optional[DeviceRegistryService] = None,
         schema_service: Optional[SchemaCatalogService] = None,
     ):
+        """
+        Initializes the device operation service.
+
+        Args:
+            device_registry: Optional `DeviceRegistryService` for resolving device_id endpoints.
+            schema_service: Optional `SchemaCatalogService` for pre-flight schema validation.
+        """
         self._registry = device_registry or DeviceRegistryService()
         self._schema_service = schema_service or SchemaCatalogService()
 
     def build_session_config(self, request: ExecutionRequestDTO) -> SessionConfig:
         """
-        Translates an external ExecutionRequestDTO into an internal SessionConfig.
+        Translates an external `ExecutionRequestDTO` into an internal engine `SessionConfig`.
+
+        Resolves connection endpoints, configures security profiles, sets execution
+        parameters, establishes schema validation configurations, and maps operation steps
+        to concrete `OperationConfig` models according to the target protocol.
+
+        Args:
+            request: `ExecutionRequestDTO` describing target and desired operations.
+
+        Returns:
+            `SessionConfig` instance ready for worker instantiation and execution.
+
+        Raises:
+            InvalidRequestError: If the request is missing operations or contains protocol-incompatible steps.
+            DeviceNotFoundError: If request specifies an unregistered device_id.
         """
         endpoint = self._registry.resolve_endpoint(request)
         proto_enum = Protocol.GNMI if endpoint.protocol == "gnmi" else Protocol.NETCONF
@@ -147,7 +173,23 @@ class DeviceOperationService:
         return session_cfg
 
     def _map_operation_step(self, step: OperationStepDTO, proto: Protocol) -> OperationConfig:
-        """Converts an OperationStepDTO to an internal OperationConfig subclass."""
+        """
+        Converts an `OperationStepDTO` to an internal `OperationConfig` subclass.
+
+        Performs protocol-matrix validation and enforces protocol-specific constraints
+        (e.g. gNMI does not support NETCONF candidate datastore locks/commits or XML subtree filters).
+
+        Args:
+            step: `OperationStepDTO` describing the operation step.
+            proto: Protocol enum (`Protocol.GNMI` or `Protocol.NETCONF`).
+
+        Returns:
+            `OperationConfig` subclass instance matching the step and protocol.
+
+        Raises:
+            InvalidRequestError: If the step is invalid, unsupported for the protocol,
+                or missing mandatory parameters.
+        """
         op_type = validate_protocol_operation(proto.value, step.op_type)
 
         if proto == Protocol.GNMI and step.filter_expression and step.filter_type == "subtree":
@@ -357,7 +399,15 @@ class DeviceOperationService:
             )
 
     def _build_selector(self, step: OperationStepDTO) -> Any:
-        """Constructs PathSelector or FilterSelector from DTO fields."""
+        """
+        Constructs a `PathSelector` or `FilterSelector` from DTO fields.
+
+        Args:
+            step: `OperationStepDTO` containing paths or filter_expression.
+
+        Returns:
+            `FilterSelector` if filter_expression is present; `PathSelector` otherwise.
+        """
         if step.filter_expression:
             return FilterSelector(
                 expression=step.filter_expression,
@@ -367,7 +417,21 @@ class DeviceOperationService:
 
     @classmethod
     def resolve_worker(cls, session_cfg: Any) -> BaseUnaryWorker:
-        """Instantiates the matching worker instance for the session."""
+        """
+        Instantiates the matching unary worker instance for the session configuration.
+
+        Selects `SequentialWorker` for multi-operation sessions, or specific workers
+        (`GetWorker`, `SetWorker`, `CapabilityWorker`, `TransactionWorker`) for single-operation sessions.
+
+        Args:
+            session_cfg: `SessionConfig` instance with operations.
+
+        Returns:
+            `BaseUnaryWorker` subclass instance configured for execution.
+
+        Raises:
+            ValueError: If the operation is not a recognized unary operation.
+        """
         operations = getattr(session_cfg, "operations", ())
         if len(operations) > 1:
             return SequentialWorker(config=session_cfg)
@@ -386,7 +450,15 @@ class DeviceOperationService:
         raise ValueError(f"Unsupported unary operation: {op}")
 
     def _resolve_worker(self, session_cfg: Any) -> BaseUnaryWorker:
-        """Instance delegation for resolve_worker (maintains compatibility with mocks)."""
+        """
+        Instance delegation for resolve_worker.
+
+        Args:
+            session_cfg: `SessionConfig` instance.
+
+        Returns:
+            `BaseUnaryWorker` subclass instance.
+        """
         return self.resolve_worker(session_cfg)
 
     def execute_unary(
@@ -395,7 +467,16 @@ class DeviceOperationService:
     ) -> ExecutionResultDTO:
         """
         Executes a unary request pipeline.
-        Returns a structured ExecutionResultDTO without terminal/file presentation side effects.
+
+        Builds domain configuration, executes workers synchronously or via thread execution,
+        and returns a structured `ExecutionResultDTO` without terminal or file presentation side effects.
+        If request.times > 1, delegates to execute_batch and aggregates step results.
+
+        Args:
+            request: `ExecutionRequestDTO` describing the operations to execute.
+
+        Returns:
+            Structured `ExecutionResultDTO` containing overall status, timing, and step results.
         """
         # If request requested repetition, delegate to execute_batch and aggregate results
         if getattr(request, "times", 1) > 1:
@@ -524,7 +605,17 @@ class DeviceOperationService:
     ) -> List[ExecutionResultDTO]:
         """
         Executes multiple ExecutionRequestDTOs concurrently using a ThreadPoolExecutor.
-        Respects `request.times` repetition multipliers and returns structured results.
+
+        Expands requests according to their .times repetition multipliers into single-run DTOs
+        (preventing multiplicative execution, conforming to ADR-003) and isolates individual
+        request failures so that one failing target does not abort the entire batch.
+
+        Args:
+            requests: Sequence of `ExecutionRequestDTO` instances to execute.
+            max_workers: Optional thread pool size limit (defaults to number of expanded requests).
+
+        Returns:
+            List of `ExecutionResultDTO` instances corresponding to each executed request.
         """
         expanded_requests = expand_request_repetitions(requests)
 
@@ -575,7 +666,21 @@ class DeviceOperationService:
         protocol: str,
         elapsed_ms: float,
     ) -> ExecutionResultDTO:
-        """Standardizes raw worker dictionaries into an ExecutionResultDTO."""
+        """
+        Standardizes raw worker dictionaries or lists into a structured `ExecutionResultDTO`.
+
+        Extracts operation/RPC names, payloads, and error status from worker results,
+        assigning standardized error codes and computing overall success.
+
+        Args:
+            raw_result: Output from `worker.start()` (dict or list of dicts).
+            target: Target device address string.
+            protocol: Protocol used for the execution.
+            elapsed_ms: Execution duration in milliseconds.
+
+        Returns:
+            Structured `ExecutionResultDTO` instance.
+        """
         items = raw_result if isinstance(raw_result, list) else [raw_result]
         step_results: List[StepResultDTO] = []
         errors: List[str] = []

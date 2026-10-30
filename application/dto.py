@@ -89,12 +89,30 @@ def validate_protocol_operation(protocol: str, op_type: str) -> str:
 
 
 class SupportedProtocol(str, Enum):
-    """Explicitly supported northbound management protocols."""
+    """
+    Explicitly supported northbound management protocols.
+
+    Attributes:
+        GNMI: gRPC Network Management Interface (RFC/Google gNMI specification).
+        NETCONF: Network Configuration Protocol (RFC 6241 over SSH/TLS).
+    """
     GNMI = "gnmi"
     NETCONF = "netconf"
 
     @classmethod
     def from_string(cls, val: Optional[str]) -> "SupportedProtocol":
+        """
+        Normalizes and parses a protocol string into a SupportedProtocol enum instance.
+
+        Args:
+            val: String representation of the protocol (case-insensitive, e.g. 'gnmi', 'NETCONF').
+
+        Returns:
+            SupportedProtocol enum instance.
+
+        Raises:
+            UnsupportedProtocolError: If val is None, empty, non-string, or not in SupportedProtocol.
+        """
         if not val or not isinstance(val, str):
             raise UnsupportedProtocolError(
                 f"Protocol must be explicitly declared as 'gnmi' or 'netconf'. Received: {val!r}"
@@ -109,7 +127,16 @@ class SupportedProtocol(str, Enum):
 
 
 class DeliveryModeDTO(str, Enum):
-    """Protocol-neutral telemetry delivery semantics conforming to RFC 8641."""
+    """
+    Protocol-neutral telemetry delivery semantics conforming to RFC 8641.
+
+    Attributes:
+        PERIODIC: Periodic cadence-based streaming at regular sample intervals.
+        EVENT_DRIVEN: On-change telemetry sent immediately when underlying state changes.
+        SNAPSHOT: One-shot telemetry snapshot returning current state and terminating.
+        ON_DEMAND: Subscription stream that delivers updates upon explicit trigger/poll commands.
+        SERVER_DETERMINED: Server-driven mode where target device decides delivery cadence.
+    """
     PERIODIC = "periodic"
     EVENT_DRIVEN = "event_driven"
     SNAPSHOT = "snapshot"
@@ -118,6 +145,18 @@ class DeliveryModeDTO(str, Enum):
 
     @classmethod
     def from_string(cls, val: Optional[str]) -> "DeliveryModeDTO":
+        """
+        Normalizes and parses a delivery mode string into a DeliveryModeDTO enum instance.
+
+        Args:
+            val: String representation of the delivery mode (defaults to PERIODIC if None or empty).
+
+        Returns:
+            DeliveryModeDTO enum instance.
+
+        Raises:
+            InvalidRequestError: If val is not a recognized delivery mode.
+        """
         if not val:
             return cls.PERIODIC
         normalized = val.strip().lower()
@@ -131,7 +170,17 @@ class DeliveryModeDTO(str, Enum):
 
 @dataclass(kw_only=True)
 class TelemetryPolicyDTO:
-    """Telemetry stream delivery and timing configuration."""
+    """
+    Telemetry stream delivery and timing configuration.
+
+    Defines cadence, heartbeat intervals, and redundant update suppression for streaming subscriptions.
+
+    Attributes:
+        mode: Protocol-neutral delivery semantic (DeliveryModeDTO.PERIODIC by default).
+        sample_interval_sec: Interval in seconds between periodic telemetry updates (must be non-negative).
+        heartbeat_interval_sec: Maximum time in seconds without an update before sending heartbeat (optional).
+        suppress_redundant: When True, suppresses unchanged updates in periodic streams.
+    """
     mode: DeliveryModeDTO = DeliveryModeDTO.PERIODIC
     sample_interval_sec: float = 10.0
     heartbeat_interval_sec: Optional[float] = None
@@ -155,7 +204,15 @@ class TelemetryPolicyDTO:
 
 @dataclass(kw_only=True)
 class MutationChangeDTO:
-    """Individual configuration mutation item for Set / Edit-Config."""
+    """
+    Individual configuration mutation item for Set / Edit-Config operations.
+
+    Attributes:
+        path: Target data tree XPath/path string to mutate (must be non-empty).
+        value: New value to apply (scalar, dictionary, or serialized string; None for deletes).
+        operation: Mutation verb ('merge', 'replace', 'delete', 'remove', 'create').
+        value_type: Optional explicit data type hint for gNMI TypedValue serialization.
+    """
     path: str
     value: Optional[Any] = None
     operation: str = "merge"  # "merge" | "replace" | "delete" | "remove" | "create"
@@ -177,7 +234,27 @@ class MutationChangeDTO:
 
 @dataclass(kw_only=True)
 class AdhocEndpointDTO:
-    """Connection parameters specified inline for ad-hoc or CLI execution."""
+    """
+    Connection and security parameters specified inline for ad-hoc or dynamic device execution.
+
+    Allows callers to interact with targets without requiring pre-registration in DeviceRegistryService.
+
+    Attributes:
+        target: Hostname and port string formatted as '<host>:<port>' (e.g. '192.168.1.1:830').
+        protocol: Mandatory Northbound protocol string.
+        username: Login credential username.
+        password: Login credential password.
+        tls_ca: Path to Certificate Authority bundle file.
+        tls_cert: Path to client certificate file (for mutual TLS).
+        tls_key: Path to client private key file (for mutual TLS).
+        skip_verify: When True, skips TLS server certificate validation.
+        insecure: When True, uses unencrypted plaintext transport.
+        tls_server_name: Server Name Indication (SNI) override.
+        tls_version: Explicit TLS protocol version string (e.g. '1.3').
+        ssh_key: Path to private key file for SSH authentication (NETCONF).
+        gnmi_use_tunnel: When True, establishes connection via gRPC tunnel.
+        gnmi_target_name: Optional logical target identifier used inside gRPC tunnel headers.
+    """
     target: str  # "<host>:<port>"
     protocol: str  # Mandatory explicit declaration: "gnmi" | "netconf"
     username: Optional[str] = None
@@ -205,7 +282,25 @@ class AdhocEndpointDTO:
 
 @dataclass(kw_only=True)
 class OperationStepDTO:
-    """Represents a single semantic operation step within a pipeline."""
+    """
+    Represents a single semantic operation step within an execution pipeline.
+
+    Encapsulates selectors, mutation payloads, telemetry policies, and protocol-specific options
+    for both unary RPCs (get, set, capabilities, transactions) and streaming subscriptions.
+
+    Attributes:
+        op_type: Operation name ('capabilities', 'get', 'get_config', 'set', 'edit_config',
+            'subscribe', 'lock', 'unlock', 'commit', 'cancel_commit', 'discard_changes', 'get-schema').
+        paths: List of data tree path strings to query or subscribe to.
+        filter_expression: Raw filter string (e.g. XML subtree or XPath filter).
+        filter_type: Type of filter ('xpath' or 'subtree').
+        prefix: Base XPath prefix applied to all relative paths in this step.
+        datastore: Target datastore name ('running', 'candidate', 'startup', 'all', 'operational', 'intended').
+        changes: List of MutationChangeDTO items for configuration write operations.
+        xml_payload: Raw XML configuration payload string (for NETCONF edit-config).
+        telemetry: Optional TelemetryPolicyDTO defining cadence and stream behavior (for subscriptions).
+        options: Dictionary of protocol-specific options (e.g. encoding, lock, confirmed, confirm_timeout, persist_id).
+    """
     op_type: str  # "capabilities" | "get" | "set" | "subscribe" | "lock" | "unlock" | "commit" | "discard_changes" | "get-schema"
     # Selectors
     paths: list[str] = field(default_factory=list)
@@ -266,7 +361,26 @@ class OperationStepDTO:
 
 @dataclass(kw_only=True)
 class ExecutionRequestDTO:
-    """Top-level external request to execute operations against a device."""
+    """
+    Top-level external request to execute operations against a network device.
+
+    Can target a registered device by 'device_id' or a dynamic target via 'adhoc_endpoint'.
+
+    Attributes:
+        device_id: Identifier of a pre-registered device in DeviceRegistryService (optional).
+        adhoc_endpoint: Explicit AdhocEndpointDTO connection parameters (optional).
+        protocol: Optional protocol override or explicit declaration ('gnmi' or 'netconf').
+        operations: Ordered list of OperationStepDTO items to execute.
+        schema_profile_id: Optional schema profile identifier for pre-flight validation.
+        schema_dirs: Paths to directories containing YANG schema files.
+        schema_cache_dir: Path to directory for SQLite/YANG compilation cache.
+        schema_validate: When True, validates requests against compiled schemas before execution.
+        schema_auto_discovery: When True, automatically discovers YANG schemas from target device.
+        schema_auto_fetch: When True, automatically downloads missing schemas via RFC 6022.
+        validate_only: When True, runs only offline schema validation without opening device connection.
+        timeout_seconds: Per-request connection and execution timeout in seconds (default: 30, max: 3600).
+        times: Repetition count for repeating unary executions (default: 1, max: 1000).
+    """
     device_id: Optional[str] = None
     adhoc_endpoint: Optional[AdhocEndpointDTO] = None
     protocol: Optional[str] = None  # May override or be verified against device_id profile
@@ -329,7 +443,16 @@ class ExecutionRequestDTO:
 
 @dataclass(kw_only=True)
 class StepResultDTO:
-    """Result of an individual operation step."""
+    """
+    Result of an individual operation step within an execution pipeline.
+
+    Attributes:
+        op_type: Operation name or RPC identifier (e.g. 'get', 'set', 'lock', 'commit').
+        success: True if the operation succeeded; False if an error occurred.
+        data: Parsed response payload (dictionary, list, or XML/JSON string) on success.
+        error: Human-readable error message if the operation failed.
+        error_code: Standardized error code identifier (e.g. 'RPC_EXECUTION_ERROR').
+    """
     op_type: str
     success: bool
     data: Optional[Any] = None
@@ -339,7 +462,20 @@ class StepResultDTO:
 
 @dataclass(kw_only=True)
 class ExecutionResultDTO:
-    """Structured response returned from unary execution."""
+    """
+    Structured response returned from unary execution.
+
+    Contains status, timing, and individual step outcomes decoupled from terminal/file presentation sinks.
+
+    Attributes:
+        target: Target device address string ('<host>:<port>').
+        protocol: Management protocol used ('gnmi' or 'netconf').
+        success: Overall execution success (True only if all steps completed without error).
+        results: List of StepResultDTO items for each operation in the request.
+        error_summary: Consolidated error message if any step failed.
+        error_code: Standardized error code string for top-level failure triage.
+        execution_time_ms: Total execution duration in milliseconds.
+    """
     target: str
     protocol: str
     success: bool
@@ -351,7 +487,21 @@ class ExecutionResultDTO:
 
 @dataclass(kw_only=True)
 class StreamEventDTO:
-    """Structured telemetry event received from a streaming subscription."""
+    """
+    Structured telemetry event received from a streaming subscription.
+
+    Suitable for consumption by WebSockets, event busses, and CLI runners.
+
+    Attributes:
+        session_id: Unique identifier of the subscription worker session.
+        target: Target device address string ('<host>:<port>').
+        protocol: Management protocol used ('gnmi' or 'netconf').
+        subscription_name: Name of the subscription stream as configured by caller.
+        data: Parsed telemetry notification payload (dictionary or list).
+        timestamp: Unix epoch timestamp in seconds when the event was received.
+        is_sync_marker: When True, indicates initial sync marker (e.g. gNMI sync_response).
+        error: Optional error description if the event represents a streaming error.
+    """
     session_id: str
     target: str
     protocol: str

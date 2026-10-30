@@ -15,6 +15,10 @@ from application.dto import ExecutionRequestDTO
 class SchemaCatalogService:
     """
     Application-level facade bridging to the core YANG schema engine and SQLite database.
+
+    Provides offline pre-flight schema validation, metadata queries, and SQLite cache
+    introspection without coupling presentation adapters to low-level libyang contexts
+    or database connection details.
     """
 
     def __init__(
@@ -22,13 +26,29 @@ class SchemaCatalogService:
         schema_manager: Optional[SchemaManager] = None,
         schema_db: Optional[SchemaDB] = None,
     ):
+        """
+        Initializes the schema catalog service with optional schema manager and database instances.
+
+        Args:
+            schema_manager: Optional custom SchemaManager instance (default: newly instantiated).
+            schema_db: Optional custom SchemaDB instance (default: newly instantiated).
+        """
         self._schema_manager = schema_manager or SchemaManager()
         self._schema_db = schema_db or SchemaDB()
 
     def validate_request_schema(self, request: ExecutionRequestDTO) -> List[str]:
         """
         Validates operations in an ExecutionRequestDTO against compiled YANG schema nodes.
-        Returns a list of validation error messages (empty if completely valid).
+
+        Checks selector paths and mutation payloads against compiled YANG schema nodes
+        within the specified profile context.
+
+        Args:
+            request: `ExecutionRequestDTO` containing operation steps, schema directories,
+                and optional schema profile identifier.
+
+        Returns:
+            List of string validation error diagnostics (empty list if all steps are valid).
         """
         profile_id = request.schema_profile_id or "default"
         search_dirs = [Path(p) for p in request.schema_dirs]
@@ -64,14 +84,33 @@ class SchemaCatalogService:
         return errors
 
     def list_cached_modules(self) -> List[Dict[str, Any]]:
-        """Returns metadata for all YANG modules stored in the local SQLite cache."""
+        """
+        Returns metadata for all YANG modules stored in the local SQLite schema cache.
+
+        Returns:
+            List of dictionaries containing module names, revisions, namespaces,
+            and file storage paths.
+        """
         return self._schema_db.list_modules()
 
     def get_database_statistics(self) -> Dict[str, Any]:
-        """Returns SQLite schema database cache metrics."""
+        """
+        Returns SQLite schema database cache metrics and table counts.
+
+        Returns:
+            Dictionary containing metrics such as total modules, profiles, and device bindings.
+        """
         return self._schema_db.get_database_statistics()
 
     def get_profile_modules(self, profile_id: str) -> List[Dict[str, Any]]:
-        """Returns the list of modules associated with a schema profile."""
+        """
+        Returns the list of modules associated with a specific schema profile.
+
+        Args:
+            profile_id: Identifier of the schema profile (e.g. 'srlinux', 'ocnos').
+
+        Returns:
+            List of module metadata dictionaries associated with the profile.
+        """
         return self._schema_db.get_profile_modules(profile_id)
 

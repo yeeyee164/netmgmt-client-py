@@ -25,7 +25,16 @@ from managers.subscribe_session import SubscribeSession
 
 
 class SubscriptionState(str, Enum):
-    """Lifecycle state of a streaming telemetry subscription."""
+    """
+    Lifecycle state of a streaming telemetry subscription
+
+    Attributes:
+        STARTING: Background worker thread spawned; stream context initialization in progress.
+        RUNNING: Connection active and stream events/updates are flowing or ready.
+        STOPPING: Stop or cancellation signal delivered; waiting for thread join.
+        STOPPED: Subscription session and worker thread terminated cleanly.
+        FAILED: Subscription worker terminated prematurely due to an RPC or transport error.
+    """
     STARTING = "starting"
     RUNNING = "running"
     STOPPING = "stopping"
@@ -34,7 +43,25 @@ class SubscriptionState(str, Enum):
 
 
 class ManagedSubscription:
-    """Holds references to an active streaming session thread and queue."""
+    """
+    Internal resource container tracking an active streaming telemetry subscription.
+
+    Maintains references to the underlying `SubscribeSession` worker, background execution
+    thread, event queue, timing metrics, and lifecycle state.
+
+    Attributes:
+        subscription_id: Unique 36-character UUID string identifying the subscription.
+        target: Target device address formatted as '<host>:<port>'.
+        protocol: Management protocol used ('gnmi' or 'netconf').
+        subscription_name: Logical subscription name defined by caller.
+        worker: Concrete SubscribeSession worker instance executing the stream.
+        thread: Background execution thread driving worker.start().
+        data_queue: Thread-safe queue buffering incoming telemetry events.
+        created_at: Unix timestamp when the subscription was instantiated.
+        stopped_at: Unix timestamp when the subscription stopped, or None if active.
+        state: Current SubscriptionState enum value.
+        error: Error description string if the subscription entered FAILED state.
+    """
 
     def __init__(
         self,
@@ -46,6 +73,18 @@ class ManagedSubscription:
         thread: threading.Thread,
         data_queue: queue.Queue,
     ):
+        """
+        Initializes a `ManagedSubscription` tracking record.
+
+        Args:
+            subscription_id: Unique UUID string.
+            target: Target address '<host>:<port>'.
+            protocol: 'gnmi' or 'netconf'.
+            subscription_name: Caller-defined subscription name.
+            worker: `SubscribeSession` worker instance.
+            thread: Background execution thread.
+            data_queue: Thread-safe Queue receiving `StreamEvent` payloads.
+        """
         self.subscription_id = subscription_id
         self.target = target
         self.protocol = protocol
@@ -59,7 +98,11 @@ class ManagedSubscription:
         self.error: Optional[str] = None
 
     def _sync_state(self) -> None:
-        """Synchronizes lifecycle state with worker and thread execution."""
+        """
+        Synchronizes lifecycle state with actual worker and thread execution status.
+
+        Updates state to STOPPED or FAILED if the thread or worker has completed.
+        """
         if self.state in (SubscriptionState.STOPPED, SubscriptionState.FAILED):
             return
 
@@ -84,6 +127,9 @@ class ManagedSubscription:
 
     @property
     def is_alive(self) -> bool:
+        """
+        True if the subscription is currently running and its worker thread is alive.
+        """
         self._sync_state()
         return self.state == SubscriptionState.RUNNING
 
@@ -91,7 +137,11 @@ class ManagedSubscription:
 class SubscriptionService:
     """
     Stateful application service managing streaming telemetry subscriptions.
-    Decoupled from CLI loops; suitable for WebSockets and async event routers.
+
+    Provides a clean, presentation-decoupled interface suitable for WebSockets,
+    SSE routers, event busses, and interactive CLI streaming runners. Manages background
+    worker threads, thread-safe bounded event queues with overflow policies, interactive
+    poll triggers, and deterministic resource cancellation.
     """
 
     def __init__(
@@ -99,6 +149,13 @@ class SubscriptionService:
         device_registry: Optional[DeviceRegistryService] = None,
         operation_service: Optional[DeviceOperationService] = None,
     ):
+        """
+        Initializes the subscription service.
+
+        Args:
+            device_registry: Optional `DeviceRegistryService` for endpoint resolution.
+            operation_service: Optional `DeviceOperationService` for building session configs.
+        """
         self._registry = device_registry or DeviceRegistryService()
         self._op_service = operation_service or DeviceOperationService(device_registry=self._registry)
         self._lock = threading.RLock()
@@ -111,8 +168,23 @@ class SubscriptionService:
         shared_queue: Optional[queue.Queue] = None,
     ) -> str:
         """
-        Starts a streaming telemetry session in a managed background thread.
-        Returns a unique subscription_id token.
+        Starts a streaming telemetry session in a managed background daemon thread.
+
+        Translates the request into a `SubscribeSession`, wires a thread-safe event queue,
+        spawns a dedicated worker thread, and registers the subscription under a unique UUID4.
+
+        Args:
+            request: `ExecutionRequestDTO` containing a subscribe `OperationStepDTO`.
+            queue_size: Maximum event buffer capacity if creating a private queue (default: 1000).
+            shared_queue: Optional shared queue.Queue instance for multi-target aggregation.
+
+        Returns:
+            Opaque 36-character UUID string identifying the started subscription.
+
+        Raises:
+            UnsupportedProtocolError: If protocol is not 'gnmi' or 'netconf'.
+            InvalidRequestError: If request does not contain a subscribe operation step.
+            DeviceNotFoundError: If request specifies an unregistered device_id.
         """
         # Validate explicit protocol
         endpoint = self._registry.resolve_endpoint(request)
@@ -168,6 +240,17 @@ class SubscriptionService:
     ) -> List[StreamEventDTO]:
         """
         Retrieves up to max_events from the subscription event queue without blocking indefinitely.
+
+        Args:
+            subscription_id: Unique subscription ID token.
+            timeout: Maximum seconds to block waiting for the first event (default: 1.0).
+            max_events: Maximum number of buffered events to drain in this call (default: 10).
+
+        Returns:
+            List of `StreamEventDTO` instances (empty if queue was empty within timeout).
+
+        Raises:
+            SubscriptionNotFoundError: If subscription_id is not active or recognized.
         """
         managed = self._get_managed(subscription_id)
         events: List[StreamEventDTO] = []
@@ -197,6 +280,19 @@ class SubscriptionService:
     ) -> Iterator[StreamEventDTO]:
         """
         Generator yielding streaming telemetry events while the subscription remains active.
+
+        Yields events as they arrive, and terminates cleanly when the subscription stops
+        and its event queue is completely drained.
+
+        Args:
+            subscription_id: Unique subscription ID token.
+            timeout: Maximum seconds to wait per queue get attempt (default: 1.0).
+
+        Yields:
+            `StreamEventDTO` instances.
+
+        Raises:
+            SubscriptionNotFoundError: If subscription_id is not active or recognized.
         """
         managed = self._get_managed(subscription_id)
         while managed.is_alive or not managed.data_queue.empty():
@@ -210,6 +306,14 @@ class SubscriptionService:
     def send_command(self, subscription_id: str, command: str) -> None:
         """
         Dispatches control commands ('poll', 'stop') to an active subscription.
+
+        Args:
+            subscription_id: Unique subscription ID token.
+            command: Control command string ('poll' to trigger an on-demand update, 'stop' to cancel).
+
+        Raises:
+            InvalidRequestError: If command is not recognized ('poll' or 'stop').
+            SubscriptionNotFoundError: If subscription_id is not active.
         """
         managed = self._get_managed(subscription_id)
         cmd = command.strip().lower()
@@ -223,6 +327,12 @@ class SubscriptionService:
     def stop_subscription(self, subscription_id: str) -> bool:
         """
         Terminates a subscription, cancels underlying streams, and cleans up resources.
+
+        Args:
+            subscription_id: Unique subscription ID token to terminate.
+
+        Returns:
+            True if the subscription was found and stopped; False if already terminated or not found.
         """
         with self._lock:
             managed = self._active_subscriptions.pop(subscription_id, None)
@@ -244,7 +354,13 @@ class SubscriptionService:
         return True
 
     def list_active_subscriptions(self) -> List[Dict[str, Any]]:
-        """Returns metadata for all running subscriptions."""
+        """
+        Returns metadata for all running subscriptions and purges terminated entries.
+
+        Returns:
+            List of dictionaries containing subscription metadata (ID, target, protocol,
+            state, creation/stopped timestamps, and error diagnostics).
+        """
         with self._lock:
             # Purge dead threads
             dead_ids = [sid for sid, m in self._active_subscriptions.items() if not m.is_alive and m.data_queue.empty()]
@@ -267,7 +383,18 @@ class SubscriptionService:
             ]
 
     def is_poll_subscription(self, subscription_id: str) -> bool:
-        """Returns True if the subscription operates in ON_DEMAND (poll) mode."""
+        """
+        Checks if the subscription operates in `ON_DEMAND (poll)` mode.
+
+        Args:
+            subscription_id: Unique subscription ID token.
+
+        Returns:
+            True if configured for polling; False for periodic/on-change streaming.
+
+        Raises:
+            SubscriptionNotFoundError: If subscription_id is not found.
+        """
         managed = self._get_managed(subscription_id)
         return bool(
             getattr(managed.worker, "is_poll_mode", lambda: False)()
@@ -275,7 +402,18 @@ class SubscriptionService:
         )
 
     def get_subscription_info(self, subscription_id: str) -> Dict[str, Any]:
-        """Returns detailed metadata for a specific active subscription."""
+        """
+        Returns detailed status metadata for a specific active subscription.
+
+        Args:
+            subscription_id: Unique subscription ID token.
+
+        Returns:
+            Dictionary containing target, protocol, state, thread liveness, and error details.
+
+        Raises:
+            SubscriptionNotFoundError: If subscription_id is not found.
+        """
         managed = self._get_managed(subscription_id)
         return {
             "subscription_id": managed.subscription_id,
@@ -292,18 +430,37 @@ class SubscriptionService:
         }
 
     def has_active_threads(self) -> bool:
-        """Returns True if any managed subscription thread is currently alive."""
+        """
+        Checks whether any managed subscription background thread is currently alive.
+
+        Returns:
+            True if at least one subscription thread is running; False otherwise.
+        """
         with self._lock:
             return any(m.thread.is_alive() for m in self._active_subscriptions.values())
 
     def stop_all(self) -> None:
-        """Terminates all active subscriptions."""
+        """
+        Terminates all active subscriptions and joins their execution threads.
+        """
         with self._lock:
             sub_ids = list(self._active_subscriptions.keys())
         for sid in sub_ids:
             self.stop_subscription(sid)
 
     def _get_managed(self, subscription_id: str) -> ManagedSubscription:
+        """
+        Internal lookup for an active `ManagedSubscription` record.
+
+        Args:
+            subscription_id: Subscription UUID string.
+
+        Returns:
+            `ManagedSubscription` instance.
+
+        Raises:
+            SubscriptionNotFoundError: If subscription_id is not found in active subscriptions.
+        """
         with self._lock:
             managed = self._active_subscriptions.get(subscription_id)
             if managed is None:
@@ -311,6 +468,16 @@ class SubscriptionService:
             return managed
 
     def _to_dto(self, item: Dict[str, Any], managed: ManagedSubscription) -> StreamEventDTO:
+        """
+        Translates a raw event queue item dictionary into a structured `StreamEventDTO`.
+
+        Args:
+            item: Raw dictionary popped from the event queue.
+            managed: `ManagedSubscription` context.
+
+        Returns:
+            `StreamEventDTO` instance.
+        """
         return StreamEventDTO(
             session_id=item.get("session_id", managed.subscription_id),
             target=item.get("target", managed.target),
