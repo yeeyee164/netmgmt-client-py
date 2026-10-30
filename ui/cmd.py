@@ -1680,7 +1680,7 @@ def session_to_execution_request(session: SessionConfig, device_id: Optional[str
             elif po is not None and hasattr(po, "source") and po.source:
                 ds = po.source
             step_dtos.append(OperationStepDTO(
-                op_type="get_config" if isinstance(op, GetConfigOperation) or getattr(op, "read_scope", "") == "config" else "get",
+                op_type="get_config" if isinstance(op, GetConfigOperation) or (adhoc.protocol == "netconf" and getattr(op, "read_scope", "") == "config") else "get",
                 paths=list(getattr(op.selector, "paths", ())) if not is_filter else [],
                 prefix=getattr(op.selector, "prefix", "") or None,
                 filter_expression=op.selector.expression if is_filter else None,

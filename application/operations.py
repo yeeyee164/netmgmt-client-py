@@ -8,9 +8,8 @@ and executes requests returning structured ExecutionResultDTO instances.
 import concurrent.futures
 import logging
 from pathlib import Path
-import threading
 import time
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence
 
 from application.dto import (
     ExecutionRequestDTO,
@@ -18,7 +17,9 @@ from application.dto import (
     OperationStepDTO,
     StepResultDTO,
     SupportedProtocol,
+    VALID_GNMI_ENCODINGS,
     expand_request_repetitions,
+    validate_protocol_operation,
 )
 from application.devices import DeviceRegistryService
 from application.schemas import SchemaCatalogService
@@ -49,7 +50,6 @@ from config.selectors import PathSelector, FilterSelector
 from config.protocol_options import GnmiOptions, NetconfOptions
 from config.delivery import DeliveryMode, DeliveryPolicy
 from modules.security import SecurityProfile
-from modules.output import OutputHandler
 from managers.unary_worker import (
     BaseUnaryWorker,
     SequentialWorker,
@@ -75,7 +75,6 @@ class DeviceOperationService:
     ):
         self._registry = device_registry or DeviceRegistryService()
         self._schema_service = schema_service or SchemaCatalogService()
-        self._output_lock = threading.Lock()
 
     def build_session_config(self, request: ExecutionRequestDTO) -> SessionConfig:
         """
@@ -149,7 +148,13 @@ class DeviceOperationService:
 
     def _map_operation_step(self, step: OperationStepDTO, proto: Protocol) -> OperationConfig:
         """Converts an OperationStepDTO to an internal OperationConfig subclass."""
-        op_type = step.op_type.lower().strip().replace("-", "_")
+        op_type = validate_protocol_operation(proto.value, step.op_type)
+
+        if proto == Protocol.GNMI and step.filter_expression and step.filter_type == "subtree":
+            raise InvalidRequestError(
+                "gNMI does not support XML subtree filter expressions.",
+                error_code="UNSUPPORTED_PROTOCOL_FILTER",
+            )
 
         # 1. Capabilities
         if op_type in ("capabilities", "capability"):
@@ -159,8 +164,14 @@ class DeviceOperationService:
         elif op_type in ("get", "get_config"):
             selector = self._build_selector(step)
             if proto == Protocol.GNMI:
+                encoding = str(step.options.get("encoding", "json_ietf")).strip().lower()
+                if encoding not in VALID_GNMI_ENCODINGS:
+                    raise InvalidRequestError(
+                        f"Unsupported gNMI encoding '{encoding}'. Valid encodings: {sorted(VALID_GNMI_ENCODINGS)}",
+                        error_code="INVALID_OPTIONS",
+                    )
                 proto_opts = GnmiOptions(
-                    encoding=step.options.get("encoding", "json_ietf"),
+                    encoding=encoding,
                 )
             else:
                 proto_opts = NetconfOptions(
@@ -182,30 +193,60 @@ class DeviceOperationService:
                 protocol_options=proto_opts,
             )
 
-        # 3. Get-Schema
+        # 3. Get-Schema (NETCONF only, enforced by PROTOCOL_OPERATION_MATRIX)
         elif op_type in ("get_schema", "schema"):
             identifier = step.paths[0] if step.paths else step.options.get("identifier", "")
+            if not identifier or not str(identifier).strip():
+                raise InvalidRequestError(
+                    "get-schema operation requires a non-empty 'identifier'.",
+                    error_code="INVALID_SELECTOR",
+                )
             return GetSchemaOperation(
-                identifier=identifier,
+                identifier=str(identifier).strip(),
                 version=step.options.get("version"),
                 format=step.options.get("format", "yang"),
             )
 
         # 4. Set / Edit-Config
         elif op_type in ("set", "edit_config", "edit"):
+            has_xml = step.xml_payload is not None or step.options.get("config") is not None
+            if not step.changes and not has_xml:
+                raise InvalidRequestError(
+                    "Set / edit-config operation requires at least one mutation change or an XML config payload.",
+                    error_code="INVALID_MUTATION",
+                )
+            if proto == Protocol.GNMI and not step.changes and has_xml:
+                raise InvalidRequestError(
+                    "gNMI 'set' does not support raw NETCONF XML payloads; provide structured 'changes'.",
+                    error_code="UNSUPPORTED_PROTOCOL_PAYLOAD",
+                )
+
             changes: List[Change] = []
             for ch in step.changes:
                 ch_op = ChangeType(ch.operation.lower())
                 changes.append(Change(path=ch.path, value=ch.value, operation=ch_op, type=ch.value_type))
 
             if proto == Protocol.GNMI:
+                encoding = str(step.options.get("encoding", "json_ietf")).strip().lower()
+                if encoding not in VALID_GNMI_ENCODINGS:
+                    raise InvalidRequestError(
+                        f"Unsupported gNMI encoding '{encoding}'. Valid encodings: {sorted(VALID_GNMI_ENCODINGS)}",
+                        error_code="INVALID_OPTIONS",
+                    )
                 proto_opts = GnmiOptions(
-                    encoding=step.options.get("encoding", "json_ietf"),
+                    encoding=encoding,
                 )
             else:
                 lock_val = step.options.get("lock_target", step.options.get("lock", False))
                 val_cand = step.options.get("validate_candidate", step.options.get("validate", False))
                 default_commit = True if step.xml_payload is not None else False
+                conf_timeout = step.options.get("confirm_timeout")
+                if conf_timeout is not None:
+                    if not isinstance(conf_timeout, int) or isinstance(conf_timeout, bool) or conf_timeout <= 0:
+                        raise InvalidRequestError(
+                            "Netconf 'confirm_timeout' must be a positive integer.",
+                            error_code="INVALID_OPTIONS",
+                        )
                 proto_opts = NetconfOptions(
                     target_datastore=step.datastore if step.datastore != "all" else step.options.get("target_datastore", "candidate"),
                     config=step.xml_payload if step.xml_payload is not None else step.options.get("config"),
@@ -216,7 +257,7 @@ class DeviceOperationService:
                     validate_candidate=bool(val_cand),
                     commit=bool(step.options.get("commit", default_commit)),
                     confirmed=bool(step.options.get("confirmed", False)),
-                    confirm_timeout=step.options.get("confirm_timeout"),
+                    confirm_timeout=conf_timeout,
                     persist=str(step.options.get("persist", "") or ""),
                     persist_id=str(step.options.get("persist_id", "") or ""),
                 )
@@ -232,39 +273,40 @@ class DeviceOperationService:
                 protocol_options=proto_opts,
             )
 
-        # 5. Candidate Transactions
+        # 5. Candidate Transactions (NETCONF only, enforced by PROTOCOL_OPERATION_MATRIX)
         elif op_type in ("lock", "unlock", "commit", "discard_changes", "cancel_commit", "validate"):
             tx_map = {
                 "lock": TransactionType.LOCK,
                 "unlock": TransactionType.UNLOCK,
                 "commit": TransactionType.COMMIT,
                 "cancel_commit": TransactionType.CANCEL_COMMIT,
-                "cancel-commit": TransactionType.CANCEL_COMMIT,
                 "discard_changes": TransactionType.DISCARD_CHANGES,
-                "discard-changes": TransactionType.DISCARD_CHANGES,
                 "validate": TransactionType.VALIDATE,
             }
             tx_type = tx_map.get(op_type, TransactionType.COMMIT)
             conf_timeout = step.options.get("confirm_timeout")
             if conf_timeout is not None:
+                if (not isinstance(conf_timeout, int) and not (isinstance(conf_timeout, str) and conf_timeout.isdigit())) or isinstance(conf_timeout, bool):
+                    raise InvalidRequestError(
+                        "Transaction 'confirm_timeout' must be a positive integer.",
+                        error_code="INVALID_OPTIONS",
+                    )
                 conf_timeout = int(conf_timeout)
-            if proto == Protocol.NETCONF:
-                from config.operations import NetconfTransactionOperation
-                return NetconfTransactionOperation(
-                    operation=tx_type,
-                    target_datastore=step.datastore if step.datastore != "all" else "candidate",
-                    source_datastore=step.options.get("source_datastore", "candidate"),
-                    confirmed=bool(step.options.get("confirmed", False)),
-                    confirm_timeout=conf_timeout,
-                    persist=str(step.options.get("persist") or ""),
-                    persist_id=str(step.options.get("persist_id") or ""),
-                )
-            else:
-                return TransactionOperation(
-                    operation=tx_type,
-                    confirmed=bool(step.options.get("confirmed", False)),
-                    confirm_timeout=conf_timeout,
-                )
+                if conf_timeout <= 0:
+                    raise InvalidRequestError(
+                        "Transaction 'confirm_timeout' must be a positive integer.",
+                        error_code="INVALID_OPTIONS",
+                    )
+            from config.operations import NetconfTransactionOperation
+            return NetconfTransactionOperation(
+                operation=tx_type,
+                target_datastore=step.datastore if step.datastore != "all" else "candidate",
+                source_datastore=step.options.get("source_datastore", "candidate"),
+                confirmed=bool(step.options.get("confirmed", False)),
+                confirm_timeout=conf_timeout,
+                persist=str(step.options.get("persist") or ""),
+                persist_id=str(step.options.get("persist_id") or ""),
+            )
 
         # 6. Subscribe
         elif op_type == "subscribe":
@@ -284,8 +326,14 @@ class DeviceOperationService:
 
             sub_name = step.options.get("subscription_name", "sub")
             if proto == Protocol.GNMI:
+                encoding = str(step.options.get("encoding", "json_ietf")).strip().lower()
+                if encoding not in VALID_GNMI_ENCODINGS:
+                    raise InvalidRequestError(
+                        f"Unsupported gNMI encoding '{encoding}'. Valid encodings: {sorted(VALID_GNMI_ENCODINGS)}",
+                        error_code="INVALID_OPTIONS",
+                    )
                 proto_opts = GnmiOptions(
-                    encoding=step.options.get("encoding", "json_ietf"),
+                    encoding=encoding,
                     updates_only=bool(step.options.get("updates_only", False)),
                 )
             else:
@@ -303,7 +351,10 @@ class DeviceOperationService:
             )
 
         else:
-            raise InvalidRequestError(f"Unsupported operation type: '{step.op_type}'")
+            raise InvalidRequestError(
+                f"Unsupported operation type: '{step.op_type}'",
+                error_code="INVALID_OPERATION",
+            )
 
     def _build_selector(self, step: OperationStepDTO) -> Any:
         """Constructs PathSelector or FilterSelector from DTO fields."""
@@ -341,25 +392,26 @@ class DeviceOperationService:
     def execute_unary(
         self,
         request: ExecutionRequestDTO,
-        output_handler: Optional[OutputHandler] = None,
-        output_handlers: Optional[Sequence[OutputHandler]] = None,
     ) -> ExecutionResultDTO:
         """
         Executes a unary request pipeline.
-        Returns a structured ExecutionResultDTO without requiring terminal/file sinks.
+        Returns a structured ExecutionResultDTO without terminal/file presentation side effects.
         """
         # If request requested repetition, delegate to execute_batch and aggregate results
         if getattr(request, "times", 1) > 1:
-            batch_results = self.execute_batch([request], output_handlers=output_handlers or ([output_handler] if output_handler else None))
+            batch_results = self.execute_batch([request])
             if batch_results:
                 combined_steps: List[StepResultDTO] = []
                 all_success = True
                 errors: List[str] = []
+                first_error_code: Optional[str] = None
                 total_ms = 0.0
                 for r in batch_results:
                     combined_steps.extend(r.results)
                     if not r.success:
                         all_success = False
+                        if first_error_code is None and r.error_code:
+                            first_error_code = r.error_code
                     if r.error_summary:
                         errors.append(r.error_summary)
                     total_ms += r.execution_time_ms
@@ -369,6 +421,7 @@ class DeviceOperationService:
                     success=all_success,
                     results=combined_steps,
                     error_summary="; ".join(errors) if errors else None,
+                    error_code=first_error_code,
                     execution_time_ms=total_ms,
                 )
 
@@ -390,8 +443,17 @@ class DeviceOperationService:
                         target=target_str,
                         protocol=proto_str,
                         success=False,
-                        results=[StepResultDTO(op_type="validate", success=False, error=e) for e in val_errors],
+                        results=[
+                            StepResultDTO(
+                                op_type="validate",
+                                success=False,
+                                error=e,
+                                error_code="SCHEMA_VALIDATION_ERROR",
+                            )
+                            for e in val_errors
+                        ],
                         error_summary="; ".join(val_errors),
+                        error_code="SCHEMA_VALIDATION_ERROR",
                         execution_time_ms=elapsed_ms,
                     )
                 return ExecutionResultDTO(
@@ -406,24 +468,7 @@ class DeviceOperationService:
             session_cfg = self.build_session_config(request)
             worker = self._resolve_worker(session_cfg)
 
-            handlers: List[OutputHandler] = []
-            if output_handler is not None:
-                handlers.append(output_handler)
-            if output_handlers is not None:
-                for h in output_handlers:
-                    if h not in handlers:
-                        handlers.append(h)
-
             raw_result = worker.start()
-
-            # Optional CLI sink invocation
-            if handlers and raw_result:
-                items = raw_result if isinstance(raw_result, list) else [raw_result]
-                with self._output_lock:
-                    for item in items:
-                        if isinstance(item, dict):
-                            for h in handlers:
-                                h.write(item)
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
             return self._format_execution_result(
@@ -434,13 +479,22 @@ class DeviceOperationService:
             )
         except ApplicationError as app_err:
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-            logger.error(f"[DeviceOperationService {target_str}] Application error: {app_err}")
+            err_code = getattr(app_err, "error_code", "APPLICATION_ERROR")
+            logger.error(f"[DeviceOperationService {target_str}] Application error ({err_code}): {app_err}")
             return ExecutionResultDTO(
                 target=target_str,
                 protocol=proto_str,
                 success=False,
-                results=[StepResultDTO(op_type="error", success=False, error=str(app_err))],
+                results=[
+                    StepResultDTO(
+                        op_type="error",
+                        success=False,
+                        error=str(app_err),
+                        error_code=err_code,
+                    )
+                ],
                 error_summary=str(app_err),
+                error_code=err_code,
                 execution_time_ms=elapsed_ms,
             )
         except Exception as exc:
@@ -450,8 +504,16 @@ class DeviceOperationService:
                 target=target_str,
                 protocol=proto_str,
                 success=False,
-                results=[StepResultDTO(op_type="error", success=False, error=str(exc))],
+                results=[
+                    StepResultDTO(
+                        op_type="error",
+                        success=False,
+                        error=str(exc),
+                        error_code="EXECUTION_ERROR",
+                    )
+                ],
                 error_summary=str(exc),
+                error_code="EXECUTION_ERROR",
                 execution_time_ms=elapsed_ms,
             )
 
@@ -459,11 +521,10 @@ class DeviceOperationService:
         self,
         requests: Sequence[ExecutionRequestDTO],
         max_workers: Optional[int] = None,
-        output_handlers: Optional[Sequence[OutputHandler]] = None,
     ) -> List[ExecutionResultDTO]:
         """
         Executes multiple ExecutionRequestDTOs concurrently using a ThreadPoolExecutor.
-        Respects `request.times` repetition multipliers and routes outputs to optional handlers.
+        Respects `request.times` repetition multipliers and returns structured results.
         """
         expanded_requests = expand_request_repetitions(requests)
 
@@ -477,7 +538,7 @@ class DeviceOperationService:
         results: List[Optional[ExecutionResultDTO]] = [None] * len(expanded_requests)
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers_count) as executor:
             future_to_idx = {
-                executor.submit(self.execute_unary, req, output_handlers=output_handlers): idx
+                executor.submit(self.execute_unary, req): idx
                 for idx, req in enumerate(expanded_requests)
             }
             for future in concurrent.futures.as_completed(future_to_idx):
@@ -493,8 +554,16 @@ class DeviceOperationService:
                         target=target_str,
                         protocol=proto_str,
                         success=False,
-                        results=[StepResultDTO(op_type="error", success=False, error=str(exc))],
+                        results=[
+                            StepResultDTO(
+                                op_type="error",
+                                success=False,
+                                error=str(exc),
+                                error_code="EXECUTION_ERROR",
+                            )
+                        ],
                         error_summary=str(exc),
+                        error_code="EXECUTION_ERROR",
                     )
 
         return [r for r in results if r is not None]
@@ -529,6 +598,7 @@ class DeviceOperationService:
                     success=not is_err,
                     data=data,
                     error=err_msg,
+                    error_code="RPC_EXECUTION_ERROR" if is_err else None,
                 )
             )
 
@@ -541,5 +611,6 @@ class DeviceOperationService:
             success=all_success,
             results=step_results,
             error_summary=error_summary,
+            error_code="RPC_EXECUTION_ERROR" if errors else None,
             execution_time_ms=elapsed_ms,
         )

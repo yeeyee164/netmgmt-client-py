@@ -85,7 +85,7 @@ engine must not depend on a particular GUI framework.
 
 ## ADR-002: Application services return structured results, not presentation output
 
-**Status:** Proposed
+**Status:** Implemented
 **Decision:** Treat structured result DTOs as the primary output
 contract. Keep terminal formatting and file output in presentation
 adapters.
@@ -113,10 +113,10 @@ GUI integration.
 
 ### Acceptance criteria
 
--   [ ] Result semantics are identical with or without CLI output
+-   [x] Result semantics are identical with or without CLI output
     configuration.
--   [ ] Result DTOs have stable status and error fields.
--   [ ] CLI formatting is owned by the CLI adapter.
+-   [x] Result DTOs have stable status and error fields.
+-   [x] CLI formatting is owned by the CLI adapter.
 
 ------------------------------------------------------------------------
 
@@ -204,7 +204,7 @@ Each subscription should have:
 
 ## ADR-005: Validate all external requests before network I/O
 
-**Status:** Proposed
+**Status:** Implemented
 **Decision:** Treat DTO construction and type hints as insufficient
 validation for API-facing input.
 
@@ -232,16 +232,16 @@ a live device connection.
 
 ### Acceptance criteria
 
--   [ ] Invalid input fails before network I/O.
--   [ ] Error codes are stable and documented.
--   [ ] Resource limits are configurable.
--   [ ] Protocol support/compatibility is covered by tests.
+-   [x] Invalid input fails before network I/O.
+-   [x] Error codes are stable and documented.
+-   [x] Resource limits are configurable.
+-   [x] Protocol support/compatibility is covered by tests.
 
 ------------------------------------------------------------------------
 
 ## ADR-006: Preserve shared semantics without pretending protocols are identical
 
-**Status:** Proposed
+**Status:** Implemented
 **Decision:** Share only concepts that have equivalent meaning; retain
 explicit protocol-specific behavior where required.
 
@@ -270,10 +270,10 @@ datastores, mutation semantics, and transaction operations.
 
 ### Acceptance criteria
 
--   [ ] Unsupported protocol/operation combinations fail early.
--   [ ] NETCONF transaction semantics are not represented as if they
+-   [x] Unsupported protocol/operation combinations fail early.
+-   [x] NETCONF transaction semantics are not represented as if they
     were universally supported by gNMI.
--   [ ] Protocol-specific filters, paths, and payloads are validated by
+-   [x] Protocol-specific filters, paths, and payloads are validated by
     the correct adapter.
 
 ------------------------------------------------------------------------

@@ -165,14 +165,14 @@ class UnaryManager(BaseRPCManager):
 
             from application.operations import DeviceOperationService
             from ui.cmd import session_to_execution_request
+            from ui.runner import CLIApplicationRunner
 
             requests = [session_to_execution_request(sc) for sc in self.session_configs]
             op_service = DeviceOperationService()
             try:
-                return op_service.execute_batch(
-                    requests=requests,
-                    output_handlers=self.output_handlers,
-                )
+                results = op_service.execute_batch(requests=requests)
+                CLIApplicationRunner.write_results(results, self.output_handlers)
+                return results
             finally:
                 self.shutdown()
 

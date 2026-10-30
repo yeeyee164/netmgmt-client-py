@@ -160,6 +160,32 @@ class CLIApplicationRunner:
         return bool(req.operations) and not CLIApplicationRunner.is_stream_request(req)
 
     @staticmethod
+    def write_results(
+        results: Sequence[ExecutionResultDTO],
+        output_handlers: Optional[Sequence[OutputHandler]] = None,
+    ) -> None:
+        """
+        Formats and writes structured ExecutionResultDTOs to presentation OutputHandlers.
+        Owns CLI/file output routing exclusively in the presentation layer (ADR-002).
+        """
+        if not output_handlers or not results:
+            return
+        for res in results:
+            for step in res.results:
+                if step.op_type == "error" and not step.success:
+                    continue
+                item = {
+                    "target": res.target,
+                    "protocol": res.protocol,
+                    "rpc": step.op_type,
+                    "data": step.data if step.success else step.error,
+                }
+                if not step.success and step.error:
+                    item["error"] = step.error
+                for handler in output_handlers:
+                    handler.write(item)
+
+    @staticmethod
     def execute(cfg: Any) -> List[ExecutionResultDTO]:
         """
         Executes all unary and streaming requests in ParsedConfig via the Application Service Layer.
@@ -183,12 +209,9 @@ class CLIApplicationRunner:
         try:
             if unary_requests:
                 op_service = DeviceOperationService(device_registry=device_registry)
-                results.extend(
-                    op_service.execute_batch(
-                        requests=unary_requests,
-                        output_handlers=handlers,
-                    )
-                )
+                batch_results = op_service.execute_batch(requests=unary_requests)
+                CLIApplicationRunner.write_results(batch_results, handlers)
+                results.extend(batch_results)
             if stream_requests:
                 stream_runner = CLIStreamRunner(device_registry=device_registry)
                 stream_runner.run(

@@ -152,6 +152,85 @@ class TestDeviceOperationServiceBuildSessionConfig:
         with pytest.raises(InvalidRequestError, match="must contain at least one operation"):
             svc.build_session_config(req)
 
+    def test_protocol_specific_validation_in_build_session_config(self):
+        registry = DeviceRegistryService()
+        registry.register_device(
+            "gnmi-dev-1",
+            AdhocEndpointDTO(target="10.0.0.1:57400", protocol="gnmi"),
+        )
+        svc = DeviceOperationService(device_registry=registry)
+
+        # 1. Deferred protocol resolution via device_id rejects NETCONF transaction on gNMI device
+        req_tx = ExecutionRequestDTO(
+            device_id="gnmi-dev-1",
+            operations=[OperationStepDTO(op_type="commit")],
+        )
+        with pytest.raises(InvalidRequestError, match="not supported by protocol 'gnmi'") as exc_info:
+            svc.build_session_config(req_tx)
+        assert exc_info.value.error_code == "UNSUPPORTED_PROTOCOL_OPERATION"
+
+        # 2. gNMI rejects XML subtree filter
+        req_subtree = ExecutionRequestDTO(
+            adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.1:57400", protocol="gnmi"),
+            operations=[
+                OperationStepDTO(
+                    op_type="get",
+                    filter_expression="<interfaces/>",
+                    filter_type="subtree",
+                )
+            ],
+        )
+        with pytest.raises(InvalidRequestError, match="does not support XML subtree") as exc_info2:
+            svc.build_session_config(req_subtree)
+        assert exc_info2.value.error_code == "UNSUPPORTED_PROTOCOL_FILTER"
+
+        # 3. gNMI rejects raw XML payload on set without structured changes
+        req_xml_set = ExecutionRequestDTO(
+            adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.1:57400", protocol="gnmi"),
+            operations=[
+                OperationStepDTO(
+                    op_type="set",
+                    xml_payload="<config><hostname>r1</hostname></config>",
+                )
+            ],
+        )
+        with pytest.raises(InvalidRequestError, match="does not support raw NETCONF XML payloads") as exc_info3:
+            svc.build_session_config(req_xml_set)
+        assert exc_info3.value.error_code == "UNSUPPORTED_PROTOCOL_PAYLOAD"
+
+        # 4. Empty set (neither changes nor XML payload) raises InvalidRequestError
+        req_empty_set = ExecutionRequestDTO(
+            adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.1:830", protocol="netconf"),
+            operations=[OperationStepDTO(op_type="set")],
+        )
+        with pytest.raises(InvalidRequestError, match="requires at least one mutation change") as exc_info4:
+            svc.build_session_config(req_empty_set)
+        assert exc_info4.value.error_code == "INVALID_MUTATION"
+
+        # 5. Invalid gNMI encoding raises InvalidRequestError
+        req_bad_enc = ExecutionRequestDTO(
+            adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.1:57400", protocol="gnmi"),
+            operations=[
+                OperationStepDTO(
+                    op_type="get",
+                    paths=["/system"],
+                    options={"encoding": "yaml_custom"},
+                )
+            ],
+        )
+        with pytest.raises(InvalidRequestError, match="Unsupported gNMI encoding") as exc_info5:
+            svc.build_session_config(req_bad_enc)
+        assert exc_info5.value.error_code == "INVALID_OPTIONS"
+
+        # 6. NETCONF get-schema requires non-empty identifier
+        req_empty_schema = ExecutionRequestDTO(
+            adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.1:830", protocol="netconf"),
+            operations=[OperationStepDTO(op_type="get-schema")],
+        )
+        with pytest.raises(InvalidRequestError, match="requires a non-empty 'identifier'") as exc_info6:
+            svc.build_session_config(req_empty_schema)
+        assert exc_info6.value.error_code == "INVALID_SELECTOR"
+
 
 class TestDeviceOperationServiceExecuteUnary:
     @patch.object(DeviceOperationService, "_resolve_worker")
@@ -183,7 +262,9 @@ class TestDeviceOperationServiceExecuteUnary:
         assert res.execution_time_ms >= 0.0
 
     @patch.object(DeviceOperationService, "_resolve_worker")
-    def test_execute_unary_with_output_handler(self, mock_resolve):
+    def test_presentation_decoupling_and_cli_runner_sink(self, mock_resolve):
+        from ui.runner import CLIApplicationRunner
+
         mock_result = {
             "session_id": "abc12345",
             "target": "10.0.0.1:57400",
@@ -195,16 +276,24 @@ class TestDeviceOperationServiceExecuteUnary:
         mock_worker.start.return_value = mock_result
         mock_resolve.return_value = mock_worker
 
-        mock_handler = MagicMock()
         svc = DeviceOperationService()
         req = ExecutionRequestDTO(
             adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.1:57400", protocol="gnmi"),
             operations=[OperationStepDTO(op_type="get", paths=["/interfaces"])],
         )
 
-        res = svc.execute_unary(req, output_handler=mock_handler)
+        res = svc.execute_unary(req)
         assert res.success is True
-        mock_handler.write.assert_called_once_with(mock_result)
+        assert res.error_code is None
+
+        mock_handler = MagicMock()
+        CLIApplicationRunner.write_results([res], output_handlers=[mock_handler])
+        mock_handler.write.assert_called_once_with({
+            "target": "10.0.0.1:57400",
+            "protocol": "gnmi",
+            "rpc": "get",
+            "data": {"state": "up"},
+        })
 
     @patch.object(DeviceOperationService, "_resolve_worker")
     def test_execute_unary_with_error_step(self, mock_resolve):
@@ -289,8 +378,11 @@ class TestDeviceOperationServiceExecuteBatch:
             ),
         ]
 
+        from ui.runner import CLIApplicationRunner
+
         mock_handler = MagicMock()
-        results = svc.execute_batch(requests, output_handlers=[mock_handler])
+        results = svc.execute_batch(requests)
+        CLIApplicationRunner.write_results(results, output_handlers=[mock_handler])
 
         assert len(results) == 2
         assert results[0].target == "10.0.0.1:57400"
