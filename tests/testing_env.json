@@ -1,0 +1,46 @@
+{
+    "srlinux": {
+        "credentials" : {
+            "user" : "admin",
+            "password" : "NokiaSrl1!"
+        },
+        "protocols": {
+            "netconf" : "172.20.20.2:830",
+            "gnmi" : "172.20.20.2:57401"
+        },
+        "yang": { 
+            "yang_path" : "../yang/srlinux",
+            "yang_module" : ["openconfig-interfaces", "openconfig-system"],
+            "timeout" : 15
+        }
+    },
+    "ceos": {
+        "credentials" : {
+            "user" : "admin",
+            "password" : "admin"
+        },
+        "protocols": {
+            "gnmi" : "172.20.20.3:6030"
+        },
+        "yang": { 
+            "yang_path" : "../yang/ceos",
+            "yang_module" : ["openconfig-interfaces", "openconfig-system"],
+            "timeout" : 15
+        }
+    },
+    "ocnos": {
+        "credentials" : {
+            "user" : "admin",
+            "password" : "Frontier12#"
+        },
+        "protocols": {
+            "netconf" : "10.1.0.101:830",
+            "gnmi" : "10.1.0.101:9339"
+        },
+        "yang": { 
+            "paths" : "../yang/ocnos_derived",
+            "yang_module" : ["ipi-streaming-telemetry", "ipi-interface"],
+            "timeout" : 15
+        }
+    }
+}

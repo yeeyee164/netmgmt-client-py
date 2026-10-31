@@ -20,51 +20,48 @@ from core.schema_context import ContextRegistry
 from core.schema_resolver import SchemaResolver
 from core.schema_manager import SchemaManager
 from config.schema import SchemaProfile, ModuleRef
-from tests.yang_fetcher import YangSchemaFetcher
+from tests.yang_fetcher import yang_test_suite_builder
 
+SUITE = yang_test_suite_builder("srlinux")
+if SUITE is None:
+    pytest.skip("Device 'srlinux' not configured in testing_env.json", allow_module_level=True)
 
-SRLINUX_TARGET = "172.20.20.2:830"
-SRLINUX_GNMI_TARGET = "172.20.20.2:57401"
-SRLINUX_USER = "admin"
-SRLINUX_PASS = "NokiaSrl1!"
-SRLINUX_MODELS = ["openconfig-interfaces", "openconfig-system"]
+SRLINUX_TARGET = SUITE.netconf_target
+SRLINUX_GNMI_TARGET = SUITE.gnmi_target
+SRLINUX_USER = SUITE.username
+SRLINUX_PASS = SUITE.password
+SRLINUX_MODELS = SUITE.modules
+YANG_DIR = SUITE.yang_dir
 
-YANG_DIR = (Path(__file__).resolve().parent / "yang" / "srlinux") if (Path(__file__).resolve().parent / "yang" / "srlinux").exists() else (Path(__file__).resolve().parent.parent / "yang" / "srlinux")
-ALT_YANG_DIR = (Path(__file__).resolve().parent.parent / "test" / "yang" / "srlinux") if (Path(__file__).resolve().parent.parent / "test" / "yang" / "srlinux").exists() else (Path(__file__).resolve().parent.parent.parent / "test" / "yang" / "srlinux")
+_CURRENT_DIR = Path(__file__).resolve().parent
+ALT_YANG_DIR = (_CURRENT_DIR.parent / "test" / "yang" / "srlinux") if (_CURRENT_DIR.parent / "test" / "yang" / "srlinux").exists() else (_CURRENT_DIR.parent.parent / "test" / "yang" / "srlinux")
 
 
 @pytest.fixture(scope="module")
 def srlinux_yang_dir():
-    """Ensures tests/yang/srlinux directory exists and models are populated."""
-    YANG_DIR.mkdir(parents=True, exist_ok=True)
+    """Ensures vendor YANG directory exists and models are populated."""
+    SUITE.yang_dir.mkdir(parents=True, exist_ok=True)
 
     # Check if models exist, otherwise gather via <get-schema>
     missing = []
-    for model in SRLINUX_MODELS:
-        candidates = list(YANG_DIR.glob(f"{model}*.yang"))
+    for model in SUITE.modules:
+        candidates = list(SUITE.yang_dir.glob(f"{model}*.yang"))
         if not candidates:
             missing.append(model)
 
     if missing:
         try:
-            fetcher = YangSchemaFetcher(
-                target=SRLINUX_TARGET,
-                username=SRLINUX_USER,
-                password=SRLINUX_PASS,
-                output_dir=YANG_DIR,
-                timeout=15,
-            )
             for m in missing:
-                fetcher.fetch_and_save(m, recursive=True)
+                SUITE.fetcher.fetch_and_save(m, recursive=True)
         except Exception as exc:
-            pytest.skip(f"Live target {SRLINUX_TARGET} unreachable or get-schema failed: {exc}")
+            pytest.skip(f"Live target {SUITE.netconf_target} unreachable or get-schema failed: {exc}")
 
-    return YANG_DIR
+    return SUITE.yang_dir
 
 
 def test_srlinux_yang_files_exist(srlinux_yang_dir):
-    """Verifies that openconfig-interfaces and openconfig-system exist in the vendor directory."""
-    for model in SRLINUX_MODELS:
+    """Verifies that configured models exist in the vendor directory."""
+    for model in SUITE.modules:
         matches = list(srlinux_yang_dir.glob(f"{model}*.yang"))
         assert len(matches) > 0, f"Expected {model} in {srlinux_yang_dir}"
         assert matches[0].stat().st_size > 0, f"YANG file {matches[0]} should not be empty"
@@ -74,20 +71,20 @@ def test_srlinux_symlink_directory_compatibility(srlinux_yang_dir):
     """Verifies that ./test/yang/srlinux points to the exact same vendor directory."""
     if ALT_YANG_DIR.exists():
         assert ALT_YANG_DIR.resolve() == srlinux_yang_dir.resolve()
-        for model in SRLINUX_MODELS:
+        for model in SUITE.modules:
             matches = list(ALT_YANG_DIR.glob(f"{model}*.yang"))
             assert len(matches) > 0, f"Expected {model} via alt path {ALT_YANG_DIR}"
 
 
 def test_srlinux_load_and_compile_context(tmp_path, srlinux_yang_dir):
-    """Loads openconfig-interfaces and openconfig-system into an isolated SchemaContext."""
+    """Loads configured models into an isolated SchemaContext."""
     cache_dir = tmp_path / "cache"
     db = SchemaDB(cache_dir=cache_dir)
     registry = ContextRegistry()
     sctx = registry.get_or_create_context(profile_id="srlinux", search_dirs=[srlinux_yang_dir, db.models_dir])
 
     resolver = SchemaResolver(schema_db=db)
-    for model in SRLINUX_MODELS:
+    for model in SUITE.modules:
         resolver.ensure_module(
             context=sctx,
             module_name=model,
@@ -95,8 +92,8 @@ def test_srlinux_load_and_compile_context(tmp_path, srlinux_yang_dir):
         )
 
     # Verify both modules compiled successfully in libyang
-    assert sctx.has_module("openconfig-interfaces")
-    assert sctx.has_module("openconfig-system")
+    for model in SUITE.modules:
+        assert sctx.has_module(model)
 
     # Verify key imported dependencies are also loaded
     assert sctx.has_module("openconfig-yang-types")
@@ -122,17 +119,15 @@ def test_srlinux_schema_db_metadata_indexing(tmp_path, srlinux_yang_dir):
         )
 
     # Verify find_module succeeds
-    oc_if_path = db.find_module("openconfig-interfaces")
-    assert oc_if_path is not None
-    assert oc_if_path.is_file()
+    for model in SUITE.modules:
+        mod_path = db.find_module(model)
+        assert mod_path is not None
+        assert mod_path.is_file()
 
     # Save profile and link modules
     profile = SchemaProfile(
         content_id="srlinux",
-        modules=(
-            ModuleRef(name="openconfig-interfaces"),
-            ModuleRef(name="openconfig-system"),
-        ),
+        modules=tuple(ModuleRef(name=m) for m in SUITE.modules),
         datastore_schemas=("running", "candidate"),
     )
     p_id = db.save_profile(profile)
@@ -141,14 +136,14 @@ def test_srlinux_schema_db_metadata_indexing(tmp_path, srlinux_yang_dir):
     # Verify query methods
     profile_mods = db.get_profile_modules(p_id)
     mod_names = [m["name"] for m in profile_mods]
-    assert "openconfig-interfaces" in mod_names
-    assert "openconfig-system" in mod_names
+    for model in SUITE.modules:
+        assert model in mod_names
 
     # Verify database statistics
     stats = db.get_database_statistics()
-    assert stats["schema_modules"] >= 2
+    assert stats["schema_modules"] >= len(SUITE.modules)
     assert stats["schema_profiles"] >= 1
-    assert stats["profile_modules"] >= 2
+    assert stats["profile_modules"] >= len(SUITE.modules)
     assert stats["profile_datastores"] == 2
 
     db.close()
@@ -159,22 +154,23 @@ def test_srlinux_device_binding_and_persistence(tmp_path):
     db_file = tmp_path / "bindings.db"
     db1 = SchemaDB(db_path=db_file, cache_dir=tmp_path / "cache")
 
+    primary_model = SUITE.modules[0] if SUITE.modules else "openconfig-interfaces"
     profile = SchemaProfile(
         content_id="srlinux_25_10",
-        modules=(ModuleRef(name="openconfig-interfaces"),),
+        modules=(ModuleRef(name=primary_model),),
     )
     p_id = db1.save_profile(profile)
 
     # Bind NETCONF and gNMI endpoints
-    db1.bind_device(SRLINUX_TARGET, protocol="netconf", profile_id=p_id)
-    db1.bind_device(SRLINUX_GNMI_TARGET, protocol="gnmi", profile_id=p_id)
+    db1.bind_device(SUITE.netconf_target, protocol="netconf", profile_id=p_id)
+    db1.bind_device(SUITE.gnmi_target, protocol="gnmi", profile_id=p_id)
 
-    info_netconf = db1.get_device_binding_info(SRLINUX_TARGET)
+    info_netconf = db1.get_device_binding_info(SUITE.netconf_target)
     assert info_netconf is not None
     assert info_netconf["protocol"] == "netconf"
     assert info_netconf["profile_id"] == p_id
 
-    info_gnmi = db1.get_device_binding_info(SRLINUX_GNMI_TARGET)
+    info_gnmi = db1.get_device_binding_info(SUITE.gnmi_target)
     assert info_gnmi is not None
     assert info_gnmi["protocol"] == "gnmi"
     assert info_gnmi["profile_id"] == p_id
@@ -183,8 +179,8 @@ def test_srlinux_device_binding_and_persistence(tmp_path):
 
     # Re-open with new instance and verify persistence
     db2 = SchemaDB(db_path=db_file, cache_dir=tmp_path / "cache")
-    assert db2.get_device_profile_id(SRLINUX_TARGET) == p_id
-    assert db2.get_device_profile_id(SRLINUX_GNMI_TARGET) == p_id
+    assert db2.get_device_profile_id(SUITE.netconf_target) == p_id
+    assert db2.get_device_profile_id(SUITE.gnmi_target) == p_id
     db2.close()
 
 
@@ -194,7 +190,7 @@ def test_srlinux_validate_openconfig_paths(tmp_path, srlinux_yang_dir):
     sctx = registry.get_or_create_context(profile_id="srlinux_validate", search_dirs=[srlinux_yang_dir])
     resolver = SchemaResolver(schema_db=SchemaDB(cache_dir=tmp_path / "cache"))
 
-    for model in SRLINUX_MODELS:
+    for model in SUITE.modules:
         resolver.ensure_module(context=sctx, module_name=model, search_dirs=[srlinux_yang_dir])
 
     # Validate path lookup in compiled schema

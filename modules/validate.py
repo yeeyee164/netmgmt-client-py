@@ -4,9 +4,13 @@ if failed to pass.
 """
 from abc import ABC, abstractmethod
 
+from typing import TYPE_CHECKING, Any
+
 import ipaddress
 import modules.path as mp
-from ui.cmd import ParsedConfig
+
+if TYPE_CHECKING:
+    from ui.cmd import ParsedConfig
 
 class PathValidationError(Exception):
     """Custom exception raised when a path is invalid for the requested protocol or RPC"""
@@ -76,7 +80,7 @@ class GNMIValidator(BaseValidator):
 
 class ValidateConfig:
     @staticmethod
-    def validate(cfg: ParsedConfig):
+    def validate(cfg: Any):
         """
         method validate validates given config  
         """

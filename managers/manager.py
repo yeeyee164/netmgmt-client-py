@@ -1,3 +1,4 @@
+import warnings
 import time
 import threading
 import queue
@@ -39,6 +40,12 @@ class BaseRPCManager:
         debug: bool = False,
         cfg: Optional[Any] = None
     ):
+        warnings.warn(
+            "RPC Managers are deprecated. Use CLIApplicationRunner or "
+            "DeviceOperationService/SubscriptionService instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if cfg is not None:
             self.session_configs = sessions if sessions is not None else cfg.sessions
             self.debug = cfg.debug
@@ -94,90 +101,22 @@ class SubscriptionManager(BaseRPCManager):
                 self.sessions.append(session)
 
     def run_all(self):
-        """Spins up a background thread for each session and waits."""
-        self.build_sessions()
-        
-        if not self.sessions:
+        """Delegates streaming execution to CLIStreamRunner and SubscriptionService."""
+        if not self.session_configs:
             logger.error("[Manager] No valid sessions to start. Exiting.")
+            self.shutdown()
             return
 
-        logger.info(f"[Manager] Starting {len(self.sessions)} concurrent sessions...")
-        
-        # Start a thread for every session
-        for session in self.sessions:
-            t = threading.Thread(target=session.start, daemon=True)
-            self.threads.append(t)
-            t.start()
+        from ui.cmd import session_to_execution_request
+        from ui.runner import CLIStreamRunner
 
-        # run another thread to invoke Poll mechanism(gNMI)
-        has_poll = any(
-            (getattr(s, 'is_poll_mode', lambda: False)() or getattr(s, 'kwargs', {}).get('mode', '').lower() == 'poll')
-            for s in self.sessions
-        )
-        if has_poll:
-            controller_t = threading.Thread(target=self._interactive_poll_controller, daemon=True)
-            controller_t.start()
-
-        # The Main Thread blocks here, keeping the script alive and watching for Ctrl+C
+        requests = [session_to_execution_request(sc) for sc in self.session_configs]
+        runner = CLIStreamRunner()
         try:
-            while any(t.is_alive() for t in self.threads):
-                try:
-                    message = self.data_queue.get(timeout=1.0)
+            runner.run(requests=requests, output_handlers=self.output_handlers)
+        finally:
+            self.shutdown()
 
-                    # Process and print the message safely in the main thread
-                    logger.debug(f"\n--- [Telemetry from Session: {message['session_id']} | Target: {message['target']}] ---")
-
-                    for handler in self.output_handlers:
-                        handler.write(message)
-                    
-                    self.data_queue.task_done()
-                except queue.Empty:
-                    continue
-        except KeyboardInterrupt:
-            logger.info("\n[Manager] Ctrl+C Detected! Initiating graceful shutdown...")
-        
-        for session in self.sessions:
-            session.stop()
-        # Give threads a moment to safely close their gRPC channels
-        for t in self.threads:
-            t.join(timeout=2) 
-
-        self.shutdown()
-            
-        logger.info("[Manager] All sessions cleanly terminated. Goodbye!")
-
-    def _interactive_poll_controller(self):
-        """A simple background CLI to allow users to trigger polls manually."""
-        poll_sessions = [
-            s for s in self.sessions
-            if (getattr(s, 'is_poll_mode', lambda: False)() or getattr(s, 'kwargs', {}).get('mode', '').lower() == 'poll')
-        ]
-        time.sleep(2)
-        
-        while True:
-            print("\n" + "="*40)
-            print(" Interactive POLL Controller")
-            print("="*40)
-            for idx, s in enumerate(poll_sessions):
-                print(f"  [{idx}] {s.session_id} - {s.target_ip} ({s.subscription_name})")
-            
-            try:
-                choice = input("\nType a session index to trigger, 'all', or press Enter to refresh: ").strip().lower()
-                if choice == 'all':
-                    for s in poll_sessions:
-                        s.trigger_poll()
-                        print(f"-> Sent POLL to {s.session_id}")
-                elif choice.isdigit():
-                    idx = int(choice)
-                    if 0 <= idx < len(poll_sessions):
-                        poll_sessions[idx].trigger_poll()
-                        print(f"-> Sent POLL to {poll_sessions[idx].session_id}")
-                    else:
-                        print("Invalid index.")
-            except EOFError:
-                break
-            except KeyboardInterrupt:
-                break       
 
 class UnaryManager(BaseRPCManager):
     """
@@ -204,21 +143,8 @@ class UnaryManager(BaseRPCManager):
         if self.worker_class is not None:
             return self.worker_class(config=sc)
 
-        operations = getattr(sc, 'operations', ())
-        if len(operations) > 1:
-            return SequentialWorker(config=sc)
-
-        op = operations[0] if len(operations) == 1 else getattr(sc, 'operation', None)
-        if isinstance(op, (GetOperation, GetSchemaOperation)):
-            return GetWorker(config=sc)
-        elif isinstance(op, SetOperation):
-            return SetWorker(config=sc)
-        elif isinstance(op, CapabilitiesOperation):
-            return CapabilityWorker(config=sc)
-        elif isinstance(op, TransactionOperation):
-            return TransactionWorker(config=sc)
-        else:
-            raise ValueError(f"Unsupported unary operation: {op}")
+        from application.operations import DeviceOperationService
+        return DeviceOperationService.resolve_worker(sc)
 
     def build_sessions(self):
         for sc in self.session_configs:
@@ -227,10 +153,34 @@ class UnaryManager(BaseRPCManager):
                 self.sessions.append(worker)
 
     def run_all(self):
+        """
+        Delegates standard unary execution to DeviceOperationService.execute_batch(),
+        retaining a direct fallback if a custom worker_class was injected.
+        """
+        if self.worker_class is None:
+            if not self.session_configs:
+                logger.warning("[Manager] No valid sessions to start. Exiting.")
+                self.shutdown()
+                return []
+
+            from application.operations import DeviceOperationService
+            from ui.cmd import session_to_execution_request
+            from ui.runner import CLIApplicationRunner
+
+            requests = [session_to_execution_request(sc) for sc in self.session_configs]
+            op_service = DeviceOperationService()
+            try:
+                results = op_service.execute_batch(requests=requests)
+                CLIApplicationRunner.write_results(results, self.output_handlers)
+                return results
+            finally:
+                self.shutdown()
+
         self.build_sessions()
         if not self.sessions:
             logger.warning("[Manager] No valid sessions to start. Exiting.")
-            return
+            self.shutdown()
+            return []
         
         logger.info(f"[Manager] Starting {len(self.sessions)} concurrent unary tasks...")
 

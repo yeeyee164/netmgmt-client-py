@@ -8,6 +8,7 @@ from live NETCONF targets via RFC 6022 <get-schema> and caching them to vendor d
 NOTE: It may be included as an official feature in the future if needed.
 """
 from __future__ import annotations
+from dataclasses import dataclass, field
 import os
 import re
 import logging
@@ -24,6 +25,116 @@ from core.schema_resolver import SchemaResolver
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_yang_dir(raw_path_str: str, device: str, base_dir: Path) -> Path:
+    """Resolves YANG vendor directory from configured relative or absolute path."""
+    p = Path(raw_path_str) if raw_path_str else Path(device)
+    if p.is_absolute() and p.exists():
+        return p
+
+    candidates = [
+        base_dir / "composite" / p,     # relative to tests/composite/
+        base_dir / p,                   # relative to tests/
+        base_dir / "yang" / p.name,     # e.g. tests/yang/srlinux or tests/yang/ocnos_derived
+        base_dir / "yang" / device,     # fallback to tests/yang/<device>
+        base_dir.parent / p,            # relative to repo root
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+
+    # If none exist yet, fallback to canonical tests/yang/<dir_name>
+    target_name = p.name if p.name and p.name != ".." else device
+    return (base_dir / "yang" / target_name).resolve()
+
+
+@dataclass(kw_only=True)
+class YangTestSuite:
+    """Immutable test suite configuration for a network device."""
+    targets: Dict[str, str]  # "netconf": 'address', "gnmi": 'address', ...
+    modules: List[str]       # list of YANG modules
+    fetcher: YangSchemaFetcher
+    yang_dir: Path
+    credentials: Dict[str, str] = field(default_factory=dict)
+    device: str = ""
+
+    @property
+    def netconf_target(self) -> Optional[str]:
+        return self.targets.get("netconf")
+
+    @property
+    def gnmi_target(self) -> Optional[str]:
+        return self.targets.get("gnmi")
+
+    @property
+    def username(self) -> str:
+        return self.credentials.get("user", "admin")
+
+    @property
+    def password(self) -> str:
+        return self.credentials.get("password", "")
+
+
+def yang_test_suite_builder(device: str, config: str | Path = "") -> Optional[YangTestSuite]:
+    """
+    Creates an instantiated `YangTestSuite` via json(`config`) file.
+    """
+    import json
+
+    tests_dir = Path(__file__).resolve().parent
+
+    candidate_paths = [
+        Path(config) if config else None,
+        tests_dir / "testing_env.json",
+        tests_dir.parent / "testing_env.json",
+        Path.cwd() / "testing_env.json",
+        Path.cwd() / "tests" / "testing_env.json",
+    ]
+
+    test_profile_path: Optional[Path] = None
+    for cp in candidate_paths:
+        if cp and cp.is_file():
+            test_profile_path = cp.resolve()
+            break
+
+    if not test_profile_path:
+        logger.warning("Could not find testing_env.json configuration file.")
+        return None
+
+    with open(test_profile_path, "r", encoding="utf-8") as f:
+        res = json.load(f)
+
+    profile = res.get(device)
+    if profile is None:
+        logger.warning(f"Device profile '{device}' not found in {test_profile_path}")
+        return None
+
+    yang_p = profile.get("yang", {})
+    cred = profile.get("credentials", {})
+    protocols = profile.get("protocols", {})
+
+    raw_yang_path = yang_p.get("yang_path") or yang_p.get("paths") or yang_p.get("path") or ""
+    yang_dir = _resolve_yang_dir(raw_yang_path, device, tests_dir)
+
+    timeout = yang_p.get("timeout", 15)
+    netconf_target = protocols.get("netconf", "")
+
+    fetcher = YangSchemaFetcher(
+        target=netconf_target,
+        username=cred.get("user", "admin"),
+        password=cred.get("password", ""),
+        output_dir=yang_dir,
+        timeout=timeout,
+    )
+
+    return YangTestSuite(
+        targets=protocols,
+        modules=yang_p.get("yang_module", []),
+        fetcher=fetcher,
+        yang_dir=yang_dir,
+        credentials=cred,
+        device=device,
+    )
 
 class YangSchemaFetcher:
     """

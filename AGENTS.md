@@ -20,15 +20,16 @@ This section provides a structured inventory of the codebase to help contributor
 
 | Path | Primary Exports / Components | Primary Role & Description |
 | :--- | :--- | :--- |
-| [`client_main.py`](client_main.py) | Entrypoint script | Universal CLI launcher; parses arguments, sets up logging, builds `ParsedConfig`, and dispatches to `ManagerFactory`. |
+| [`client_main.py`](client_main.py) | Entrypoint script | Universal CLI launcher; parses arguments, sets up logging, builds `ParsedConfig`, and dispatches via `CLIApplicationRunner` to the Application Service Layer. |
+| [`application/`](application/) | `DeviceOperationService`, `SubscriptionService`, `DeviceRegistryService`, `SchemaCatalogService`, DTOs | Application Service Layer. Protocol-agnostic, presentation-decoupled service layer with explicit protocol declaration (`SupportedProtocol`). Translates caller intent (`ExecutionRequestDTO`) into domain configs, coordinates unary/streaming operations, returns structured `ExecutionResultDTO`s, and manages telemetry lifecycles. |
 | [`config/`](config/) | `SessionConfig`, `OperationConfig`, `DeliveryPolicy`, `SchemaConfig` | Domain configuration layer. Decouples session parameters into `ConnectionConfig`, `ExecutionConfig`, `OperationConfig`, and `SchemaConfig`. Defines protocol-neutral `DeliveryMode` (RFC 8641). |
 | [`config/protocol_options/`](config/protocol_options/) | `GnmiOptions`, `NetconfOptions` | Protocol-specific configuration structures (gNMI encodings/sample intervals; NETCONF datastores, locks, confirmed commits, RFC 5277 parameters). |
 | [`core/`](core/) | `SchemaManager`, `SchemaContext`, `SchemaDB`, `SchemaValidator`, `SchemaSerializer` | Protocol-agnostic YANG schema compilation, SQLite metadata caching (`schema_cache.db`), topological dependency resolution, path validation, and `libyang` XML/JSON serialization. Detailed guide in [`core/README.md`](core/README.md). |
-| [`managers/`](managers/) | `ManagerFactory`, `UnaryManager`, `SubscriptionManager`, Worker classes | Concurrency and orchestration layer. Dispatches unary tasks via `ThreadPoolExecutor` and streaming telemetry via worker threads and a centralized `queue.Queue`. |
+| [`managers/`](managers/) | `ManagerFactory`, `UnaryManager`, `SubscriptionManager`, Worker classes | Concurrency and orchestration layer. Spawns unary worker threads (`GetWorker`, `SetWorker`, `SequentialWorker`, `TransactionWorker`) and `SubscribeSession`. Provides backward-compatible manager facades (deprecated in favor of application services). |
 | [`specs/`](specs/) | `BaseClient`, `GNMIClient`, `NetconfClient`, `BaseValidator`, Stream types | Concrete protocol implementations. Implements gRPC calls for gNMI and `ncclient` SSH/TLS sessions for NETCONF. Implements semantic operations (`execute_capabilities`, `execute_get`, `execute_set`, `execute_subscribe`, `execute_transaction`, `execute_schema`). |
 | [`specs/gnmi/`](specs/gnmi/) | `gnmi_pb2.py`, `gnmi_pb2_grpc.py`, `gnmi_ext_pb2.py` | Compiled Google gNMI Protocol Buffer stubs. |
 | [`modules/`](modules/) | `OutputHandler`, `ProtocolFormatter`, `SecurityModule`, `parse_path` | Output routing (STDOUT, STDERR, file, RFC 5424 syslog), formatters (JSON, XML, text), TLS/SSH security profiles, and XPath string parsing. |
-| [`ui/`](ui/) | `build_args`, `config_builder`, `ParsedConfig` | Interface ingestion layer. Defines `argparse` nested subparsers and hierarchical YAML parser that normalizes inputs into `ParsedConfig`. |
+| [`ui/`](ui/) | `build_args`, `config_builder`, `CLIApplicationRunner`, `CLIStreamRunner`, `ParsedConfig` | Interface ingestion and presentation layer. Defines `argparse` nested subparsers, hierarchical YAML parser, request DTO transformers, and CLI execution/streaming runners. |
 | [`util/`](util/) | `utils.py` | Common helper functions (file reading, byte conversions, string formatting). |
 | [`protos/`](protos/) | `gnmi.proto`, `gnmi_ext.proto`, `tunnel.proto` | Source Protocol Buffer definitions for gNMI and gRPC tunneling. |
 | [`tests/`](tests/) | Unit & Composite test suites, YAML/XML fixtures | Test suite covering models, validators, managers, schema compilation, transaction lifecycles, and streaming subscriptions. |
@@ -39,30 +40,39 @@ This section provides a structured inventory of the codebase to help contributor
 ## 3. Core Architecture & Data Flow
 
 ```text
-[ CLI Input / YAML Config ]
+[ CLI Input / YAML Config / Web API ]
             │
             ▼
-       [ ui/cmd.py ]  ──────────> Creates [ ParsedConfig ] -> [ SessionConfig ]
+ [ Presentation Adapters (ui/cmd.py / API) ] ────> Builds [ ExecutionRequestDTO ] (Explicit Protocol)
             │
             ▼
-   [ ManagerFactory ]
-        ├── UnaryManager            ───> Spawns Worker Threads [ GetWorker / SetWorker / CapabilityWorker / TransactionWorker / SequentialWorker ]
-        └── SubscriptionManager     ───> Spawns Worker Threads [ SubscribeSession ]
-                                                │
-                                                ▼
-                                        [ ClientFactory ]
-                                        ├── GNMIClient (BaseClient)    ──> HTTP/2 (gRPC via grpcio)
-                                        └── NetconfClient (BaseClient) ──> SSH / TLS (ncclient)
-                                                │
-                                                ▼
-                                        [ OutputHandler ]
-                                        └── Formatter (GNMIFormatter / NETCONFFormatter)
-                                                │
-                                                ▼
-                                     [ stdout / stderr / file / syslog ]
+[ Application Service Layer (application/) ]
+     ├── DeviceRegistryService    ───────────────> Resolves device endpoints & credentials
+     ├── SchemaCatalogService     ───────────────> Pre-flight schema validation & profile caching
+     ├── DeviceOperationService   ───────────────> Orchestrates unary/batch requests; returns ExecutionResultDTO
+     └── SubscriptionService      ───────────────> Coordinates streaming sessions & thread-safe event queues
+            │                                      │
+            │ (assembles domain SessionConfig)     │ (spawns SubscribeSession worker)
+            ▼                                      ▼
+[ Worker Engines (managers/) ]
+     ├── Unary Workers [ GetWorker / SetWorker / CapabilityWorker / TransactionWorker / SequentialWorker ]
+     └── Stream Worker [ SubscribeSession ]
+     *(Deprecated Facades: ManagerFactory, UnaryManager, SubscriptionManager)
+            │
+            ▼
+    [ ClientFactory (specs/) ]
+     ├── GNMIClient (BaseClient)    ─────────────> HTTP/2 (gRPC via grpcio)
+     └── NetconfClient (BaseClient) ─────────────> SSH / TLS (ncclient)
+            │
+            ▼
+ [ Result Delivery & Presentation Sinks ]
+     ├── Direct ExecutionResultDTO ──────────────> Structured return objects to callers/APIs
+     └── OutputHandler (Optional)  ──────────────> Formatter (GNMIFormatter / NETCONFFormatter)
+                                                   └── [ stdout / stderr / file / syslog ]
 ```
 
 ### Key Reference Documents
+- **Application Service Layer Spec:** [`docs/application_service_layer_specification.md`](docs/application_service_layer_specification.md)
 - **Core Architecture & Data Flow:** [`docs/core_architecture_and_data_flow.md`](docs/core_architecture_and_data_flow.md)
 - **YANG Schema Engine Architecture:** [`core/README.md`](core/README.md) and [`docs/yang_schema_architecture.md`](docs/schema/yang_schema_architecture.md)
 - **NETCONF Client Milestones:** [`docs/milestone/milestone_netconf.md`](docs/milestone/milestone_netconf.md)

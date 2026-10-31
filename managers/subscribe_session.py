@@ -1,6 +1,7 @@
 import time
 import hashlib
 import logging
+import queue
 from typing import Optional, Any
 
 from managers.factory import ClientFactory
@@ -72,37 +73,56 @@ class SubscribeSession:
             return getattr(self.operation.delivery, 'mode', None) is DeliveryMode.ON_DEMAND
         return str(self.kwargs.get('mode', '')).lower() == 'poll'
 
+    def _enqueue_item(self, item: dict) -> None:
+        if self.data_queue is None:
+            return
+        try:
+            self.data_queue.put_nowait(item)
+        except queue.Full:
+            # DROP_OLDEST policy to prevent worker thread stall and unbounded memory growth
+            try:
+                _ = self.data_queue.get_nowait()
+                self.data_queue.task_done()
+            except (queue.Empty, ValueError):
+                pass
+            try:
+                self.data_queue.put_nowait(item)
+            except queue.Full:
+                pass
+            logger.warning(
+                f"[Worker {self.session_id} | {self.target}] Telemetry queue full; dropped oldest event."
+            )
+
     def _handle_stream_event(self, event: StreamEvent) -> None:
         """Processes incoming StreamEvent and forwards structured message to data_queue."""
         if event.error is not None:
             logger.error(f"[Worker {self.session_id} | {self.target_ip}] Stream event error: {event.error}")
-            if self.data_queue is not None:
-                self.data_queue.put({
-                    'session_id': self.session_id,
-                    'target': self.target,
-                    'subscription_name': self.subscription_name,
-                    'rpc': 'subscribe' if isinstance(self.operation, SubscribeOperation) else self.kwargs.get('operation', 'unknown'),
-                    'data': event.error,
-                    'protocol': event.protocol or self.protocol,
-                    'error': event.error,
-                })
-            return
-
-        payload = event.raw_payload if event.raw_payload is not None else event.data
-        if self.data_queue is not None:
-            self.data_queue.put({
+            self._enqueue_item({
                 'session_id': self.session_id,
                 'target': self.target,
                 'subscription_name': self.subscription_name,
                 'rpc': 'subscribe' if isinstance(self.operation, SubscribeOperation) else self.kwargs.get('operation', 'unknown'),
-                'data': payload,
+                'data': event.error,
                 'protocol': event.protocol or self.protocol,
-                'is_sync_marker': event.is_sync_marker,
+                'error': event.error,
             })
+            return
+
+        payload = event.raw_payload if event.raw_payload is not None else event.data
+        self._enqueue_item({
+            'session_id': self.session_id,
+            'target': self.target,
+            'subscription_name': self.subscription_name,
+            'rpc': 'subscribe' if isinstance(self.operation, SubscribeOperation) else self.kwargs.get('operation', 'unknown'),
+            'data': payload,
+            'protocol': event.protocol or self.protocol,
+            'is_sync_marker': event.is_sync_marker,
+        })
 
     def start(self) -> None:
         """Starts streaming execution loop delegating to client.execute_subscribe."""
         self.is_running = True
+        self.last_error = None
         mode_str = self.operation.delivery.mode.value if isinstance(self.operation, SubscribeOperation) else self.kwargs.get('mode', '').upper()
         logger.debug(f"[Worker {self.session_id} | {self.target_ip}]"
                      f" Starting '{self.subscription_name}' ({mode_str}) session...")
@@ -147,9 +167,11 @@ class SubscribeSession:
                         ))
 
         except Exception as e:
+            self.last_error = str(e)
             if not self.stream_context.is_cancelled:
                 logger.error(f"[Worker {self.session_id} | {self.target_ip}] Error in '{self.subscription_name}': {e}")
         finally:
+            self.is_running = False
             logger.info(f"[Worker {self.session_id} | {self.target_ip}] Disconnected from '{self.subscription_name}'.")
 
     def stop(self) -> None:

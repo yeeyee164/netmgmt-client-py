@@ -1,7 +1,7 @@
 # -*- encoding: utf-8 -*-
 
 from ui.cmd import build_args, config_builder
-from managers.manager import ManagerFactory
+from ui.runner import CLIApplicationRunner
 
 from modules.logger import setup_logger
 import logging
@@ -21,14 +21,14 @@ if __name__ == '__main__':
     logger.info(f"Initializeing sessions...")
     for sess in cfg.sessions:
         logger.info(f"Target: {sess.target}, Protocol: {sess.protocol}")
-    logger.debug(f"Configuration loaded: sessions({len(cfg.sessions)})")
+    logger.debug(f"Configuration loaded: sessions({len(cfg.sessions)}), requests({len(cfg.requests)})")
 
     if args.debug:
         print(f"given config:\n{cfg}")
 
-    # run configured client
+    # run configured client via Application Service Layer runner
     try:
-        ManagerFactory.execute(cfg=cfg)
+        CLIApplicationRunner.execute(cfg=cfg)
     except Exception as e:
         logger.error(f"Fatal Engine error: {e}", exc_info=True)
         sys.exit(1)
