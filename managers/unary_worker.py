@@ -35,6 +35,7 @@ class BaseUnaryWorker:
         self.protocol = protocol.lower() if protocol else 'gnmi'
         self.security = security
         self.insecure = kwargs.get('insecure', False)
+        self.execution = kwargs.get('execution', None)
         self.operation = kwargs.get('operation', '')
         self.operations = tuple(kwargs.get('operations', ()))
         if not self.operations and self.operation:
@@ -53,6 +54,7 @@ class BaseUnaryWorker:
                 self.protocol = proto_val.value if hasattr(proto_val, 'value') else str(proto_val).lower()
                 self.security = config.security
                 self.insecure = config.insecure
+                self.execution = getattr(config, 'execution', None)
                 self.operation = getattr(config, 'operation', None)
                 self.operations = tuple(config.operations) if hasattr(config, 'operations') and config.operations else ()
                 if not self.operations and self.operation:
@@ -86,13 +88,17 @@ class BaseUnaryWorker:
 
     def _format_single_result(self, rpc_name: str, data: Any, op: Any = None) -> dict:
         """Standardizes a single operation output dictionary for handlers."""
-        return {
+        res = {
             'session_id': self.session_id,
             'target': self.target,
             'rpc': rpc_name,
             'data': data,
             'protocol': self.protocol,
         }
+        op_id = getattr(op, 'op_id', None) if op is not None else None
+        if op_id:
+            res['op_id'] = op_id
+        return res
 
     def _format_result(self, default_rpc_name, data):
         """Standardizes the output dictionary for the handlers"""
@@ -265,24 +271,28 @@ class SequentialWorker(BaseUnaryWorker):
     def start(self):
         logger.debug(f"[Worker(Sequential) {self.target_ip}] Executing {len(self.operations)} sequential operations...")
         results = []
+        continue_on_error = getattr(self.execution, 'continue_on_error', False) if self.execution else False
         try:
             with self._get_client() as client:
                 # operations holds each protocol RPC 'specifically'
                 for op in self.operations:
                     rpc_name = self._get_rpc_name(op)
+                    op_id = getattr(op, 'op_id', None)
+                    log_pfx = f"[{op_id}] " if op_id else ""
+                    logger.debug(f"[Worker(Sequential) {self.target_ip}] {log_pfx}Executing operation '{rpc_name}'...")
                     is_err = False
                     try:
                         res = client.execute(op)
                         if isinstance(res, Exception):
                             is_err = True
                     except Exception as e:
-                        logger.error(f"[Worker(Sequential) {self.target_ip}] Error in operation '{rpc_name}': {e}")
+                        logger.error(f"[Worker(Sequential) {self.target_ip}] {log_pfx}Error in operation '{rpc_name}': {e}")
                         res = e
                         is_err = True
                     results.append(self._format_single_result(rpc_name, res, op=op))
-                    if is_err:
+                    if is_err and not continue_on_error:
                         logger.warning(
-                            f"[Worker(Sequential) {self.target_ip}] Aborting subsequent operations after error in '{rpc_name}'."
+                            f"[Worker(Sequential) {self.target_ip}] {log_pfx}Aborting subsequent operations after error in '{rpc_name}'."
                         )
                         break
         except Exception as e:

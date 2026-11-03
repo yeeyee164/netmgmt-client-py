@@ -300,8 +300,10 @@ class OperationStepDTO:
         xml_payload: Raw XML configuration payload string (for NETCONF edit-config).
         telemetry: Optional TelemetryPolicyDTO defining cadence and stream behavior (for subscriptions).
         options: Dictionary of protocol-specific options (e.g. encoding, lock, confirmed, confirm_timeout, persist_id).
+        op_id: Optional explicit or implicit operation identifier (e.g. 'netconf-edit-config-01').
     """
     op_type: str  # "capabilities" | "get" | "set" | "subscribe" | "lock" | "unlock" | "commit" | "discard_changes" | "get-schema"
+    op_id: Optional[str] = None
     # Selectors
     paths: list[str] = field(default_factory=list)
     filter_expression: Optional[str] = None
@@ -380,6 +382,7 @@ class ExecutionRequestDTO:
         validate_only: When True, runs only offline schema validation without opening device connection.
         timeout_seconds: Per-request connection and execution timeout in seconds (default: 30, max: 3600).
         times: Repetition count for repeating unary executions (default: 1, max: 1000).
+        continue_on_error: When True, continues executing sequential operations despite errors (default: False).
     """
     device_id: Optional[str] = None
     adhoc_endpoint: Optional[AdhocEndpointDTO] = None
@@ -395,6 +398,7 @@ class ExecutionRequestDTO:
     validate_only: bool = False
     timeout_seconds: int = 30
     times: int = 1
+    continue_on_error: bool = False
 
     def __post_init__(self):
         if not self.device_id and not self.adhoc_endpoint:
@@ -448,12 +452,14 @@ class StepResultDTO:
 
     Attributes:
         op_type: Operation name or RPC identifier (e.g. 'get', 'set', 'lock', 'commit').
+        op_id: Optional explicit or implicit operation identifier (e.g. 'netconf-edit-config-01').
         success: True if the operation succeeded; False if an error occurred.
         data: Parsed response payload (dictionary, list, or XML/JSON string) on success.
         error: Human-readable error message if the operation failed.
         error_code: Standardized error code identifier (e.g. 'RPC_EXECUTION_ERROR').
     """
     op_type: str
+    op_id: Optional[str] = None
     success: bool
     data: Optional[Any] = None
     error: Optional[str] = None

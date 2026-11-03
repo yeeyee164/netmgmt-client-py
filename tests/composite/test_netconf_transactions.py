@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from config.protocol_options.netconf import NetconfOptions
+from config.model import ExecutionConfig, SessionConfig, ConnectionConfig, Protocol
 from config.operations import (
     SetOperation,
     Change,
@@ -274,6 +275,37 @@ class TestWorkersAndShortCircuit(unittest.TestCase):
         self.assertIsInstance(results[1]["data"], RuntimeError)
         self.assertEqual(mock_client.execute.call_count, 2)
 
+    def test_sequential_worker_continue_on_error(self):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.execute.side_effect = [
+            "LOCK_OK",
+            RuntimeError("Edit failed"),
+            "UNLOCK_OK",
+        ]
+
+        worker = SequentialWorker(
+            target_ip="10.0.0.1",
+            target_port=830,
+            protocol="netconf",
+            execution=ExecutionConfig(continue_on_error=True),
+            operations=(
+                NetconfTransactionOperation(operation=TransactionType.LOCK),
+                SetOperation(changes=()),
+                NetconfTransactionOperation(operation=TransactionType.UNLOCK),
+            ),
+        )
+        worker._get_client = MagicMock(return_value=mock_client)
+
+        results = worker.start()
+
+        # Should execute all 3 operations despite error on 2nd
+        self.assertEqual(len(results), 3)
+        self.assertEqual(results[0]["data"], "LOCK_OK")
+        self.assertIsInstance(results[1]["data"], RuntimeError)
+        self.assertEqual(results[2]["data"], "UNLOCK_OK")
+        self.assertEqual(mock_client.execute.call_count, 3)
+
 
 class TestCliAndYamlParsing(unittest.TestCase):
     def test_cli_edit_config_flags(self):
@@ -335,6 +367,62 @@ class TestCliAndYamlParsing(unittest.TestCase):
         self.assertEqual(op_commit.operation, TransactionType.COMMIT)
         self.assertTrue(op_commit.confirmed)
         self.assertEqual(op_commit.confirm_timeout, 30)
+
+    def test_parse_operation_item_explicit_and_implicit_ids(self):
+        from config.model import Protocol
+        # 1. Top-level sibling explicit ID
+        op_sibling = parse_operation_item(
+            {"id": "step_sibling_01", "edit-config": {"target": "running"}},
+            Protocol.NETCONF,
+            step_index=1,
+        )
+        self.assertEqual(op_sibling.op_id, "step_sibling_01")
+
+        # 2. Nested explicit ID
+        op_nested = parse_operation_item(
+            {"edit-config": {"id": "step_nested_02", "target": "running"}},
+            Protocol.NETCONF,
+            step_index=2,
+        )
+        self.assertEqual(op_nested.op_id, "step_nested_02")
+
+        # 3. Implicit formatted ID with step_index
+        op_implicit = parse_operation_item(
+            {"get-config": {"source": "running"}},
+            Protocol.NETCONF,
+            step_index=5,
+        )
+        self.assertEqual(op_implicit.op_id, "netconf-get-config-05")
+
+        # 4. Implicit formatted ID for gNMI
+        op_gnmi = parse_operation_item(
+            {"capability": {}},
+            Protocol.GNMI,
+            step_index=1,
+        )
+        self.assertEqual(op_gnmi.op_id, "gnmi-capability-01")
+
+    def test_sequential_worker_propagates_op_id(self):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.execute.side_effect = ["CAP_OK", "GET_OK"]
+
+        from config.operations import CapabilitiesOperation, GetConfigOperation
+        worker = SequentialWorker(
+            target_ip="10.0.0.1",
+            target_port=830,
+            protocol="netconf",
+            operations=(
+                CapabilitiesOperation(op_id="netconf-cap-01"),
+                GetConfigOperation(op_id="custom-step-two"),
+            ),
+        )
+        worker._get_client = MagicMock(return_value=mock_client)
+
+        results = worker.start()
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["op_id"], "netconf-cap-01")
+        self.assertEqual(results[1]["op_id"], "custom-step-two")
 
 
 if __name__ == "__main__":
