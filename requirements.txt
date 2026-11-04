@@ -1,0 +1,9 @@
+grpcio>=1.50.0
+grpcio-tools>=1.50.0
+ncclient>=0.6.13
+xmltodict>=0.13.0
+pyyaml>=6.0
+lxml>=4.9.0
+pytest>=7.0.0
+libyang==5.0.0
+

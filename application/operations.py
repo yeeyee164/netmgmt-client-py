@@ -142,6 +142,7 @@ class DeviceOperationService:
             timeout=request.timeout_seconds,
             retry_count=1,
             times=1,  # Repetition multiplier is handled authoritatively by Application Service Layer
+            continue_on_error=getattr(request, "continue_on_error", False),
         )
 
         # Schema Config
@@ -200,7 +201,7 @@ class DeviceOperationService:
 
         # 1. Capabilities
         if op_type in ("capabilities", "capability"):
-            return CapabilitiesOperation()
+            return CapabilitiesOperation(op_id=step.op_id)
 
         # 2. Get / Get-Config
         elif op_type in ("get", "get_config"):
@@ -228,11 +229,13 @@ class DeviceOperationService:
                     selector=selector,
                     read_scope=read_scope,
                     protocol_options=proto_opts,
+                    op_id=step.op_id,
                 )
             return GetOperation(
                 selector=selector,
                 read_scope=read_scope,
                 protocol_options=proto_opts,
+                op_id=step.op_id,
             )
 
         # 3. Get-Schema (NETCONF only, enforced by PROTOCOL_OPERATION_MATRIX)
@@ -247,6 +250,7 @@ class DeviceOperationService:
                 identifier=str(identifier).strip(),
                 version=step.options.get("version"),
                 format=step.options.get("format", "yang"),
+                op_id=step.op_id,
             )
 
         # 4. Set / Edit-Config
@@ -308,11 +312,13 @@ class DeviceOperationService:
                     changes=tuple(changes),
                     prefix=step.prefix or "",
                     protocol_options=proto_opts,
+                    op_id=step.op_id,
                 )
             return SetOperation(
                 changes=tuple(changes),
                 prefix=step.prefix or "",
                 protocol_options=proto_opts,
+                op_id=step.op_id,
             )
 
         # 5. Candidate Transactions (NETCONF only, enforced by PROTOCOL_OPERATION_MATRIX)
@@ -348,6 +354,7 @@ class DeviceOperationService:
                 confirm_timeout=conf_timeout,
                 persist=str(step.options.get("persist") or ""),
                 persist_id=str(step.options.get("persist_id") or ""),
+                op_id=step.op_id,
             )
 
         # 6. Subscribe
@@ -390,6 +397,7 @@ class DeviceOperationService:
                 delivery=delivery,
                 subscription_name=sub_name,
                 protocol_options=proto_opts,
+                op_id=step.op_id,
             )
 
         else:
@@ -697,9 +705,11 @@ class DeviceOperationService:
             if is_err and err_msg:
                 errors.append(err_msg)
 
+            op_id = item.get("op_id")
             step_results.append(
                 StepResultDTO(
                     op_type=rpc_name,
+                    op_id=op_id,
                     success=not is_err,
                     data=data,
                     error=err_msg,

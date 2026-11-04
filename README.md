@@ -1,8 +1,8 @@
-# netmgnt-client-py
+# netmgmt-client-py
 
 A high-performance, protocol-agnostic Northbound (NB) network management and automation engine written in Python 3. 
 
-**`netmgnt-client-py`** provides a unified interface to interact with multi-vendor Network Operating Systems (Cisco IOS-XE/XR, Juniper Junos, Arista EOS, Nokia SR Linux/SROS) using standardized, YANG-driven management protocols:
+**`netmgmt-client-py`** provides a unified interface to interact with multi-vendor Network Operating Systems (Cisco IOS-XE/XR, Juniper Junos, Arista EOS, Nokia SR Linux/SROS) using standardized, YANG-driven management protocols:
 * **gNMI** (gRPC Network Management Interface over HTTP/2)
 * **NETCONF** (RFC 6241, RFC 5277, RFC 6022 over SSH/TLS)
 * *(Planned)* **RESTCONF** (RFC 8040 over HTTPS)
@@ -36,7 +36,8 @@ A high-performance, protocol-agnostic Northbound (NB) network management and aut
 ### Quick Setup
 
 ```bash
-# 1. Activate your virtual environment. For example:
+# 1. Activate your virtual environment.
+# For example:
 source $HOME/pyvenv3.10/bin/activate
 
 # 2. Install required Python packages
@@ -148,6 +149,62 @@ outputs:
 
 ---
 
+### 3. Run with Docker
+
+A multi-stage `Dockerfile` is provided to run `netmgmt-client-py` in an isolated container packaging all required system C-libraries (`libyang` tagged `v5.4.9`, `libpcre2`, `libxml2`, `libxslt`, `libffi`) without needing manual host toolchain installation.
+
+#### Build Image
+
+```bash
+docker build -t netmgmt-client:latest .
+```
+
+#### Run CLI Commands
+
+Use `--network host` on Linux so the container directly uses host routing to reach target management interfaces:
+
+```bash
+# Display general help
+docker run --rm netmgmt-client:latest --help
+
+# gNMI capabilities check
+docker run --rm --network host netmgmt-client:latest \
+  gnmi -t 172.20.20.2:57401 -u admin -p NokiaSrl1! -i capability
+
+# NETCONF capabilities check
+docker run --rm --network host netmgmt-client:latest \
+  netconf -t 172.20.20.2:830 -u admin -p NokiaSrl1! capability
+```
+
+#### Run YAML Pipelines (Mounting Workspace)
+
+Mount the current working directory to `/workspace` so the container can access your YAML configuration files, payload templates, and certificates:
+
+```bash
+# Execute a NETCONF transaction pipeline
+docker run --rm --network host \
+  -v $(pwd):/workspace -w /workspace \
+  netmgmt-client:latest \
+  netconf -c pipeline_netconf.yaml
+
+# Redirect structured output to a local JSON file
+docker run --rm --network host \
+  -v $(pwd):/workspace -w /workspace \
+  netmgmt-client:latest \
+  netconf -c pipeline_netconf.yaml > output.json
+```
+
+#### Run Unit Tests inside Container
+
+The container entrypoint transparently forwards arguments to `pytest` or custom commands:
+
+```bash
+docker run --rm netmgmt-client:latest pytest -m "not live" tests/
+```
+
+
+---
+
 ## Protocol User Guides
 
 For detailed, in-depth walkthroughs of all CLI flags, options, schema validation, and YAML orchestration patterns, consult the dedicated protocol user guides:
@@ -161,7 +218,7 @@ For detailed, in-depth walkthroughs of all CLI flags, options, schema validation
 
 ## Contributor & Architecture Navigation
 
-If you are developing or contributing to **`netmgnt-client-py`**:
+If you are developing or contributing to **`netmgmt-client-py`**:
 * **Architecture, Module Inventory & Guidelines:** Consult [`AGENTS.md`](AGENTS.md) for a concise component breakdown of each directory (`config/`, `core/`, `managers/`, `specs/`, `modules/`, `ui/`).
 * **YANG Schema & Caching Engine:** Consult [`core/README.md`](core/README.md) for data models, SQLite cache schemas, and `libyang` integration details.
 * **Running Tests:** Run the full test suite via `pytest tests/`.

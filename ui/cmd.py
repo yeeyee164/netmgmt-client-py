@@ -425,7 +425,8 @@ class CLIConfigBuilder(ConfigBuilder):
             )
 
             exec_cfg = ExecutionConfig(
-                times=times
+                times=times,
+                continue_on_error=getattr(self.args, 'continue_on_error', False),
             )
 
             paths = getattr(self.args, 'path', []) or []
@@ -665,13 +666,20 @@ class CLIConfigBuilder(ConfigBuilder):
             log_file=self.args.log_file,
         )
 
-def parse_operation_item(op_item: Any, protocol: Protocol = Protocol.NETCONF) -> OperationConfig:
+def parse_operation_item(
+    op_item: Any,
+    protocol: Protocol = Protocol.NETCONF,
+    step_index: Optional[int] = None,
+    default_op_id: Optional[str] = None,
+) -> OperationConfig:
     """
     Parses a single operation entry from YAML into a typed OperationConfig.
 
     Args:
         op_item: data of 'operations' key in YAML
         protocol: currently supported protocol defined at `config/model.py`
+        step_index: 1-based index of operation within sequential operations list
+        default_op_id: optional fallback operation identifier
     
     Raises:
         FileConfigError: if given operation in `operations` does not support, or invalid data given
@@ -688,6 +696,7 @@ def parse_operation_item(op_item: Any, protocol: Protocol = Protocol.NETCONF) ->
     Note:
         - Mapping syntax: {"get-schema": {"identifier": "openconfig-interfaces", ...}}
         - Object syntax: {"operation": "get-schema", "identifier": "openconfig-interfaces", ...}
+        - Top-level named step: {"id": "step1", "get-schema": {"identifier": "..."}}
         - Direct OperationConfig instances.
     """
     if isinstance(op_item, OperationConfig):
@@ -696,12 +705,16 @@ def parse_operation_item(op_item: Any, protocol: Protocol = Protocol.NETCONF) ->
     if not isinstance(op_item, dict):
         raise FileConfigError(f"Operation entry must be a dictionary, got {type(op_item).__name__}: {op_item}")
 
-    if "operation" in op_item or "type" in op_item:
-        op_name = str(op_item.get("operation") or op_item.get("type"))
-        op_params = {k: v for k, v in op_item.items() if k not in ("operation", "type")}
-    elif len(op_item) == 1:
-        op_name = list(op_item.keys())[0]
-        params_val = op_item[op_name]
+    # Extract top-level explicit id/name if present
+    explicit_id = op_item.get("id") or op_item.get("op_id") or op_item.get("name")
+    cleaned_item = {k: v for k, v in op_item.items() if k not in ("id", "op_id", "name")}
+
+    if "operation" in cleaned_item or "type" in cleaned_item:
+        op_name = str(cleaned_item.get("operation") or cleaned_item.get("type"))
+        op_params = {k: v for k, v in cleaned_item.items() if k not in ("operation", "type")}
+    elif len(cleaned_item) == 1:
+        op_name = list(cleaned_item.keys())[0]
+        params_val = cleaned_item[op_name]
         op_params = params_val if isinstance(params_val, dict) else {}
     else:
         raise FileConfigError(
@@ -712,8 +725,20 @@ def parse_operation_item(op_item: Any, protocol: Protocol = Protocol.NETCONF) ->
 
     op_norm = op_name.strip().lower().replace("_", "-")
 
+    # Extract nested id/name if top-level was not provided
+    nested_id = op_params.get("id") or op_params.get("op_id") or op_params.get("name")
+    final_op_id = explicit_id or nested_id
+    if not final_op_id:
+        proto_str = protocol.value.lower() if hasattr(protocol, "value") else str(protocol).lower()
+        if step_index is not None:
+            final_op_id = f"{proto_str}-{op_norm}-{step_index:02d}"
+        elif default_op_id:
+            final_op_id = default_op_id
+        else:
+            final_op_id = f"{proto_str}-{op_norm}"
+
     if op_norm in ("capability", "capabilities"):
-        return CapabilitiesOperation()
+        return CapabilitiesOperation(op_id=final_op_id)
 
     elif op_norm == "get-schema":
         ident = op_params.get("identifier")
@@ -724,7 +749,8 @@ def parse_operation_item(op_item: Any, protocol: Protocol = Protocol.NETCONF) ->
         return GetSchemaOperation(
             identifier=str(ident),
             version=str(version) if version is not None else None,
-            format=str(format_val)
+            format=str(format_val),
+            op_id=final_op_id,
         )
 
     elif op_norm == "get-config":
@@ -747,7 +773,8 @@ def parse_operation_item(op_item: Any, protocol: Protocol = Protocol.NETCONF) ->
         return GetConfigOperation(
             selector=selector,
             read_scope="config",
-            protocol_options=nc_opts
+            protocol_options=nc_opts,
+            op_id=final_op_id,
         )
 
     elif op_norm == "get":
@@ -775,7 +802,8 @@ def parse_operation_item(op_item: Any, protocol: Protocol = Protocol.NETCONF) ->
         return GetOperation(
             selector=selector,
             read_scope=read_scope,
-            protocol_options=p_opts
+            protocol_options=p_opts,
+            op_id=final_op_id,
         )
 
     elif op_norm in ("edit-config", "set"):
@@ -853,7 +881,8 @@ def parse_operation_item(op_item: Any, protocol: Protocol = Protocol.NETCONF) ->
             return SetOperation(
                 changes=tuple(changes_list),
                 prefix=prefix,
-                protocol_options=gnmi_opts
+                protocol_options=gnmi_opts,
+                op_id=final_op_id,
             )
 
         target_ds = op_params.get("target_datastore") or op_params.get("target", "candidate")
@@ -886,7 +915,8 @@ def parse_operation_item(op_item: Any, protocol: Protocol = Protocol.NETCONF) ->
         )
         return EditConfigOperation(
             changes=(),
-            protocol_options=nc_opts
+            protocol_options=nc_opts,
+            op_id=final_op_id,
         )
 
     elif op_norm in ("lock", "unlock", "commit", "cancel-commit", "cancel_commit", "discard-changes", "discard_changes", "validate"):
@@ -920,6 +950,7 @@ def parse_operation_item(op_item: Any, protocol: Protocol = Protocol.NETCONF) ->
             confirm_timeout=confirm_timeout_val,
             persist=persist_val,
             persist_id=persist_id_val,
+            op_id=final_op_id,
         )
 
     else:
@@ -985,6 +1016,15 @@ class FileConfigBuilder(ConfigBuilder):
         global_password = global_cfg.get('password', d.get('password', ''))
         global_times = global_cfg.get('times', d.get('times', 1))
         global_insecure = global_cfg.get('insecure', d.get('insecure', False))
+        global_continue_on_error = bool(
+            global_cfg.get(
+                'continue_on_error',
+                d.get(
+                    'continue_on_error',
+                    global_cfg.get('continue-on-error', d.get('continue-on-error', False)),
+                ),
+            )
+        )
         global_protocol = global_cfg.get('protocol', d.get('protocol', self.protocol))
         global_sec_cfg = global_cfg.get('security', {})
         global_security = SecurityProfile(
@@ -1054,6 +1094,12 @@ class FileConfigBuilder(ConfigBuilder):
             t_username = tgt_info.get('username', reg_ep.username if (reg_ep and reg_ep.username is not None) else global_username)
             t_password = tgt_info.get('password', reg_ep.password if (reg_ep and reg_ep.password is not None) else global_password)
             t_times = tgt_info.get('times', global_times)
+            t_continue_on_error = bool(
+                tgt_info.get(
+                    'continue_on_error',
+                    tgt_info.get('continue-on-error', global_continue_on_error),
+                )
+            )
             t_protocol = tgt_info.get('protocol', reg_ep.protocol if reg_ep else global_protocol) or 'gnmi'
             t_insecure = tgt_info.get('insecure', reg_ep.insecure if reg_ep else global_insecure)
             proto_enum = Protocol.GNMI if t_protocol.lower() == 'gnmi' else Protocol.NETCONF
@@ -1068,7 +1114,8 @@ class FileConfigBuilder(ConfigBuilder):
             )
             exec_cfg = ExecutionConfig(
                 times=t_times,
-                timeout=tgt_info.get('timeout', 30)
+                timeout=tgt_info.get('timeout', 30),
+                continue_on_error=t_continue_on_error,
             )
 
             # Check if sequential `operations` pipeline is specified
@@ -1079,7 +1126,10 @@ class FileConfigBuilder(ConfigBuilder):
                 if not ops_raw:
                     raise FileConfigError(f"'operations' for target {target_ip_port} cannot be empty")
 
-                parsed_ops = [parse_operation_item(op_entry, protocol=proto_enum) for op_entry in ops_raw]
+                parsed_ops = [
+                    parse_operation_item(op_entry, protocol=proto_enum, step_index=idx)
+                    for idx, op_entry in enumerate(ops_raw, 1)
+                ]
                 session = SessionConfig(
                     connection=conn,
                     protocol=proto_enum,
@@ -1150,7 +1200,7 @@ class FileConfigBuilder(ConfigBuilder):
                     connection=conn,
                     protocol=proto_enum,
                     operation=op_obj,
-                    execution=ExecutionConfig(times=t_times),
+                    execution=ExecutionConfig(times=t_times, continue_on_error=t_continue_on_error),
                     schema=t_schema,
                 )
                 sessions.append(session)
@@ -1166,7 +1216,7 @@ class FileConfigBuilder(ConfigBuilder):
                     connection=conn,
                     protocol=proto_enum,
                     operation=op_obj,
-                    execution=ExecutionConfig(times=t_times),
+                    execution=ExecutionConfig(times=t_times, continue_on_error=t_continue_on_error),
                     schema=t_schema,
                 )
                 sessions.append(session)
@@ -1241,7 +1291,7 @@ class FileConfigBuilder(ConfigBuilder):
                         connection=conn,
                         protocol=proto_enum,
                         operation=op_obj,
-                        execution=ExecutionConfig(times=t_times),
+                        execution=ExecutionConfig(times=t_times, continue_on_error=t_continue_on_error),
                         schema=t_schema,
                     )
                     sessions.append(session)
@@ -1272,7 +1322,7 @@ class FileConfigBuilder(ConfigBuilder):
                     connection=conn,
                     protocol=proto_enum,
                     operation=op_obj,
-                    execution=ExecutionConfig(times=t_times),
+                    execution=ExecutionConfig(times=t_times, continue_on_error=t_continue_on_error),
                     schema=t_schema,
                 )
                 sessions.append(session)
@@ -1332,7 +1382,7 @@ class FileConfigBuilder(ConfigBuilder):
                     connection=conn,
                     protocol=proto_enum,
                     operation=op_obj,
-                    execution=ExecutionConfig(times=t_times),
+                    execution=ExecutionConfig(times=t_times, continue_on_error=t_continue_on_error),
                     schema=t_schema,
                 )
                 sessions.append(session)
@@ -1397,6 +1447,8 @@ def build_args(args=None) -> argparse.Namespace:
     parser.add_argument('-t', '--target', action='append', help="List of targets in IP:PORT format")
     parser.add_argument('-d', '--debug', help="Debugging this script", action='store_true')
     parser.add_argument('--times', default=1, type=int, help="Generate duplicated requests - only use for testing")
+    parser.add_argument('--continue-on-error', action='store_true', default=False,
+                        help="Continue sequential execution despite operation errors")
     parser.add_argument('-u', '--username', default='', help="Username")
     parser.add_argument('-p', '--password', default='', help="Password")
     parser.add_argument('-i', '--insecure', action='store_true',
@@ -1660,11 +1712,13 @@ def session_to_execution_request(session: SessionConfig, device_id: Optional[str
 
     step_dtos = []
     for op in session.operations:
+        op_id = getattr(op, "op_id", None)
         if isinstance(op, CapabilitiesOperation):
-            step_dtos.append(OperationStepDTO(op_type="capabilities"))
+            step_dtos.append(OperationStepDTO(op_type="capabilities", op_id=op_id))
         elif isinstance(op, GetSchemaOperation):
             step_dtos.append(OperationStepDTO(
                 op_type="get-schema",
+                op_id=op_id,
                 paths=[op.identifier] if op.identifier else [],
                 options={"version": op.version, "format": op.format},
             ))
@@ -1681,6 +1735,7 @@ def session_to_execution_request(session: SessionConfig, device_id: Optional[str
                 ds = po.source
             step_dtos.append(OperationStepDTO(
                 op_type="get_config" if isinstance(op, GetConfigOperation) or (adhoc.protocol == "netconf" and getattr(op, "read_scope", "") == "config") else "get",
+                op_id=op_id,
                 paths=list(getattr(op.selector, "paths", ())) if not is_filter else [],
                 prefix=getattr(op.selector, "prefix", "") or None,
                 filter_expression=op.selector.expression if is_filter else None,
@@ -1724,6 +1779,7 @@ def session_to_execution_request(session: SessionConfig, device_id: Optional[str
                         opts[k] = getattr(po, k)
             step_dtos.append(OperationStepDTO(
                 op_type="set",
+                op_id=op_id,
                 datastore=ds,
                 changes=changes,
                 xml_payload=xml_payload,
@@ -1734,6 +1790,7 @@ def session_to_execution_request(session: SessionConfig, device_id: Optional[str
             tx_name = op.operation.value if hasattr(op.operation, "value") else str(op.operation).lower()
             step_dtos.append(OperationStepDTO(
                 op_type=tx_name,
+                op_id=op_id,
                 datastore=getattr(op, "target_datastore", "candidate"),
                 options={
                     "source_datastore": getattr(op, "source_datastore", "candidate"),
@@ -1762,6 +1819,7 @@ def session_to_execution_request(session: SessionConfig, device_id: Optional[str
                         sub_opts[k] = getattr(po, k)
             step_dtos.append(OperationStepDTO(
                 op_type="subscribe",
+                op_id=op_id,
                 paths=list(getattr(op.selector, "paths", ())) if not is_filter else [],
                 prefix=getattr(op.selector, "prefix", "") or None,
                 filter_expression=op.selector.expression if is_filter else None,
@@ -1800,6 +1858,7 @@ def session_to_execution_request(session: SessionConfig, device_id: Optional[str
         schema_auto_fetch=schema_auto_fetch,
         timeout_seconds=session.execution.timeout if hasattr(session, "execution") and session.execution else 30,
         times=session.execution.times if hasattr(session, "execution") and session.execution else 1,
+        continue_on_error=session.execution.continue_on_error if hasattr(session, "execution") and session.execution else False,
     )
 
 

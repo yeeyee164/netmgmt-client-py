@@ -84,6 +84,7 @@ class ExecutionConfig:
     timeout: int = 30     # timeout value of for each RPC. It may denote TCP timeout.
     retry_count: int = 0  # Retry count
     times: int = 1        # If it has more than 1, it will spawn multiple requests with same information.
+    continue_on_error: bool = False  # If True, sequential pipeline continues on RPC error
 
 @dataclass(frozen=True, kw_only=True)
 class SessionConfig:

@@ -180,6 +180,8 @@ class CLIApplicationRunner:
                     "rpc": step.op_type,
                     "data": step.data if step.success else step.error,
                 }
+                if step.op_id:
+                    item["op_id"] = step.op_id
                 if not step.success and step.error:
                     item["error"] = step.error
                 for handler in output_handlers:

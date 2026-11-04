@@ -61,6 +61,8 @@ class OutputHandler:
             meta = {
                 'source': message.get('target'),
             }
+            if message.get('op_id'):
+                meta['op_id'] = message.get('op_id')
 
             if sub_name != '':
                 meta['subscription_name'] = sub_name
@@ -77,8 +79,10 @@ class OutputHandler:
         elif self.format == 'text':
             formatted_data = self.formatter.format_text(raw_data)
             rpc = message.get('rpc')
-            if rpc:
-                output_str = f"\n--- [Operation: {rpc}] ---\n{formatted_data}"
+            op_id = message.get('op_id')
+            op_str = f"{rpc} | op_id: {op_id}" if (rpc and op_id) else (rpc or "")
+            if op_str:
+                output_str = f"\n--- [Operation: {op_str}] ---\n{formatted_data}"
             else:
                 output_str = f"\n{formatted_data}"
         else:

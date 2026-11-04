@@ -5,8 +5,11 @@ from config.selectors import Selector, PathSelector
 from config.delivery import DeliveryPolicy
 from config.protocol_options.base import BaseProtocolOptions
 
+@dataclass(frozen=True, kw_only=True)
 class OperationConfig:
     """Base marker for all semantic operational intents."""
+    op_id: Optional[str] = None
+
     def validate(self) -> None:
         """Validate operational intent and encapsulated options."""
         if hasattr(self, 'protocol_options') and self.protocol_options is not None:
@@ -69,6 +72,7 @@ class GetConfigOperation(GetOperation):
         object.__setattr__(self, 'selector', sel)
         object.__setattr__(self, 'read_scope', read_scope)
         object.__setattr__(self, 'protocol_options', kwargs.get('protocol_options', protocol_options))
+        object.__setattr__(self, 'op_id', kwargs.get('op_id', None))
 
 @dataclass(frozen=True, kw_only=True)
 class Change:
@@ -104,6 +108,7 @@ class SetOperation(OperationConfig):
             object.__setattr__(self, 'changes', tuple(c))
         object.__setattr__(self, 'prefix', pr)
         object.__setattr__(self, 'protocol_options', po)
+        object.__setattr__(self, 'op_id', kwargs.get('op_id', None))
 
     def validate(self) -> None:
         if self.protocol_options is not None and hasattr(self.protocol_options, 'validate'):
