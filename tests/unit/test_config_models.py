@@ -332,7 +332,7 @@ class TestClientSemanticExecution(unittest.TestCase):
 class TestWorkersAndManagersSemanticIntegration(unittest.TestCase):
     def test_manager_factory_with_semantic_sessions(self):
         from managers.manager import ManagerFactory, UnaryManager, SubscriptionManager
-        from ui.cmd import ParsedConfig
+        from cli.cmd import ParsedConfig
 
         conn = ConnectionConfig(target="10.0.0.1:9339")
         get_sess = SessionConfig(connection=conn, protocol=Protocol.GNMI, operation=GetOperation(selector=PathSelector(paths=["/interfaces"])))
@@ -462,7 +462,7 @@ class TestWorkersAndManagersSemanticIntegration(unittest.TestCase):
         self.assertEqual(client.execute(SubscribeOperation(selector=PathSelector(paths=()), delivery=DeliveryPolicy())), "SUB_OK")
 
     def test_parse_operation_mapping_syntax(self):
-        from ui.cmd import parse_operation_item
+        from cli.cmd import parse_operation_item
         op1 = parse_operation_item({"capability": {}})
         self.assertIsInstance(op1, CapabilitiesOperation)
 
@@ -489,7 +489,7 @@ class TestWorkersAndManagersSemanticIntegration(unittest.TestCase):
         self.assertEqual(op5.protocol_options.default_operation, "replace")
 
     def test_parse_operation_object_syntax(self):
-        from ui.cmd import parse_operation_item
+        from cli.cmd import parse_operation_item
         op1 = parse_operation_item({"operation": "get-schema", "identifier": "ietf-interfaces"})
         self.assertIsInstance(op1, GetSchemaOperation)
         self.assertEqual(op1.identifier, "ietf-interfaces")
@@ -499,7 +499,7 @@ class TestWorkersAndManagersSemanticIntegration(unittest.TestCase):
         self.assertEqual(op2.protocol_options.source, "candidate")
 
     def test_parse_operation_validation_errors(self):
-        from ui.cmd import parse_operation_item, FileConfigError
+        from cli.cmd import parse_operation_item, FileConfigError
         # Missing mandatory identifier
         with self.assertRaises(FileConfigError):
             parse_operation_item({"get-schema": {}})
@@ -514,7 +514,7 @@ class TestWorkersAndManagersSemanticIntegration(unittest.TestCase):
 
     def test_file_config_builder_operations_list_parsing(self):
         import tempfile
-        from ui.cmd import FileConfigBuilder
+        from cli.cmd import FileConfigBuilder
 
         yaml_content = """
 protocol: "netconf"
@@ -559,7 +559,7 @@ targets:
         self.assertEqual(c1, ("/interfaces/interface", ChangeType.MERGE, 100))
 
     def test_parse_gnmi_operations(self):
-        from ui.cmd import parse_operation_item
+        from cli.cmd import parse_operation_item
 
         # 1. Capability
         op_cap = parse_operation_item({"capability": {}}, protocol=Protocol.GNMI)
@@ -619,7 +619,7 @@ targets:
         self.assertEqual(op_set.changes[3].value, "1500")
 
     def test_parse_gnmi_set_error_handling(self):
-        from ui.cmd import parse_operation_item, FileConfigError
+        from cli.cmd import parse_operation_item, FileConfigError
 
         # String without delimiter
         with self.assertRaises(FileConfigError) as ctx:
@@ -633,7 +633,7 @@ targets:
 
     def test_file_config_builder_gnmi_operations_list_and_deprecation(self):
         import tempfile
-        from ui.cmd import FileConfigBuilder, FileConfigError
+        from cli.cmd import FileConfigBuilder, FileConfigError
 
         # Valid operations list for gNMI
         valid_yaml = """

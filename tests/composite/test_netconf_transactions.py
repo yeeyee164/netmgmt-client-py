@@ -13,7 +13,7 @@ from config.operations import (
 from specs.base_client import UnsupportedOperationError
 from specs.netconf_client import NetconfClient
 from managers.unary_worker import TransactionWorker, SequentialWorker
-from ui.cmd import build_args, config_builder, parse_operation_item
+from cli.cmd import build_args, config_builder, parse_operation_item
 
 
 class TestNetconfTransactionOptions(unittest.TestCase):
