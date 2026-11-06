@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from ui.cmd import build_args, parse_args, FileConfigBuilder, CLIConfigBuilder
+from cli.cmd import build_args, parse_args, FileConfigBuilder, CLIConfigBuilder
 from config import Protocol
 from config.schema import SchemaConfig
 

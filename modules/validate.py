@@ -10,7 +10,7 @@ import ipaddress
 import modules.path as mp
 
 if TYPE_CHECKING:
-    from ui.cmd import ParsedConfig
+    from cli.cmd import ParsedConfig
 
 class PathValidationError(Exception):
     """Custom exception raised when a path is invalid for the requested protocol or RPC"""

@@ -17,7 +17,7 @@ from specs.stream_types import StreamContext, StreamEvent
 from specs.netconf_client import NetconfClient
 from specs.netconf_validator import NetconfValidator
 from modules.validate import PathValidationError
-from ui.cmd import build_args, parse_args
+from cli.cmd import build_args, parse_args
 
 
 class DummyNotification:

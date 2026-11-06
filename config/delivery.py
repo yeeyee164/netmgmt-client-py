@@ -7,7 +7,7 @@ class DeliveryMode(str, Enum):
     """Protocol-neutral telemetry delivery semantics.
 
     Wire-protocol vocabularies (e.g. gNMI ``ONCE``/``POLL``/``ON_CHANGE``) must be
-    translated into these members at the interface layer (``ui/cmd.py``) and
+    translated into these members at the interface layer (``cli/cmd.py``) and
     translated back into wire frames by each protocol client implementation.
     """
     # Core Protocol-Neutral Members (RFC 8641 / YANG-Push)

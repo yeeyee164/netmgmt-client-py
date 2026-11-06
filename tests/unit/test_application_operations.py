@@ -263,7 +263,7 @@ class TestDeviceOperationServiceExecuteUnary:
 
     @patch.object(DeviceOperationService, "_resolve_worker")
     def test_presentation_decoupling_and_cli_runner_sink(self, mock_resolve):
-        from ui.runner import CLIApplicationRunner
+        from cli.runner import CLIApplicationRunner
 
         mock_result = {
             "session_id": "abc12345",
@@ -378,7 +378,7 @@ class TestDeviceOperationServiceExecuteBatch:
             ),
         ]
 
-        from ui.runner import CLIApplicationRunner
+        from cli.runner import CLIApplicationRunner
 
         mock_handler = MagicMock()
         results = svc.execute_batch(requests)
