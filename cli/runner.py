@@ -192,7 +192,7 @@ class CLIApplicationRunner:
         """
         Executes all unary and streaming requests in ParsedConfig via the Application Service Layer.
         """
-        from ui.cmd import session_to_execution_request
+        from cli.adapters import session_to_execution_request
 
         handlers: List[OutputHandler] = [
             OutputHandler(out_cfg) for out_cfg in getattr(cfg, "outputs", [])

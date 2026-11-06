@@ -107,8 +107,8 @@ class SubscriptionManager(BaseRPCManager):
             self.shutdown()
             return
 
-        from ui.cmd import session_to_execution_request
-        from ui.runner import CLIStreamRunner
+        from cli.cmd import session_to_execution_request
+        from cli.runner import CLIStreamRunner
 
         requests = [session_to_execution_request(sc) for sc in self.session_configs]
         runner = CLIStreamRunner()
@@ -164,8 +164,8 @@ class UnaryManager(BaseRPCManager):
                 return []
 
             from application.operations import DeviceOperationService
-            from ui.cmd import session_to_execution_request
-            from ui.runner import CLIApplicationRunner
+            from cli.cmd import session_to_execution_request
+            from cli.runner import CLIApplicationRunner
 
             requests = [session_to_execution_request(sc) for sc in self.session_configs]
             op_service = DeviceOperationService()

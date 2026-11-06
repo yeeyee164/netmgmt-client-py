@@ -36,7 +36,7 @@ for m in [
                 mock_obj.BYTES = 1
             sys.modules[m] = mock_obj
 
-from ui.cmd import (
+from cli.cmd import (
     SessionConfig,
     ParsedConfig,
 )

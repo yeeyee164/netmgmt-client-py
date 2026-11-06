@@ -2,13 +2,13 @@
 from unittest.mock import MagicMock, patch
 import pytest
 
-from ui.cmd import (
+from cli.cmd import (
     FileConfigBuilder,
     ParsedConfig,
     session_to_execution_request,
     execution_request_to_session,
 )
-from ui.runner import CLIApplicationRunner, CLIStreamRunner
+from cli.runner import CLIApplicationRunner, CLIStreamRunner
 from managers.manager import ManagerFactory, UnaryManager, SubscriptionManager
 from application.operations import DeviceOperationService
 from application.devices import DeviceRegistryService
@@ -159,7 +159,7 @@ targets:
         assert parsed.sessions[0].target == "10.10.10.1:57400"
         assert parsed.sessions[0].username == "admin"
 
-    @patch("ui.runner.OutputHandler")
+    @patch("cli.runner.OutputHandler")
     @patch("managers.manager.OutputHandler")
     @patch.object(DeviceOperationService, "_resolve_worker")
     def test_cli_application_runner_and_manager_factory_delegation(

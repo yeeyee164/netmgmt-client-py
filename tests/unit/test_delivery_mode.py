@@ -6,7 +6,7 @@ from config.delivery import DeliveryMode, DeliveryPolicy
 from config.operations import SubscribeOperation
 from config.selectors import PathSelector
 from config.model import SessionConfig, ConnectionConfig, Protocol
-from ui.cmd import resolve_delivery_mode, FileConfigBuilder, CLIConfigBuilder, build_args, config_builder
+from cli.cmd import resolve_delivery_mode, FileConfigBuilder, CLIConfigBuilder, build_args, config_builder
 from managers.subscribe_session import SubscribeSession
 
 try:
@@ -86,7 +86,7 @@ class TestDeliveryModeEnumAndPolicy(unittest.TestCase):
 
 
 class TestResolveDeliveryMode(unittest.TestCase):
-    """Verifies ui/cmd.py resolve_delivery_mode helper."""
+    """Verifies cli/cmd.py resolve_delivery_mode helper."""
 
     def test_legacy_cli_and_yaml_modes(self):
         self.assertIs(resolve_delivery_mode("once", None), DeliveryMode.SNAPSHOT)

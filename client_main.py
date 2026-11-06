@@ -1,7 +1,7 @@
 # -*- encoding: utf-8 -*-
 
-from ui.cmd import build_args, config_builder
-from ui.runner import CLIApplicationRunner
+from cli.cmd import build_args, config_builder
+from cli.runner import CLIApplicationRunner
 
 from modules.logger import setup_logger
 import logging

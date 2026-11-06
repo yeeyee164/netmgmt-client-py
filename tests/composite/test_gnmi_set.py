@@ -12,7 +12,7 @@ from specs.client import GNMIClient
 from managers.unary_worker import SetWorker
 from modules.validate import GNMIValidator, PathValidationError
 from modules.formatter import GNMIFormatter
-from ui.cmd import build_args, CLIConfigBuilder, SessionConfig
+from cli.cmd import build_args, CLIConfigBuilder, SessionConfig
 
 from config import (
     SetOperation,
