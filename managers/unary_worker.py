@@ -4,7 +4,7 @@ import logging
 import dataclasses
 from typing import Optional, Any
 
-from util.utils import str_to_bytes
+from util.utils import str_to_bytes, format_error_summary
 from managers.factory import ClientFactory, ValidatorFactory
 from config.model import SessionConfig, Protocol
 from config.operations import (
@@ -135,7 +135,7 @@ class CapabilityWorker(BaseUnaryWorker):
                 return self._format_result("capability", result)
                 
         except Exception as e:
-            logger.error(f'[Worker(Capability) {self.target_ip}] Error: {e}')
+            logger.error(f'[Worker(Capability) {self.target_ip}] Error: {format_error_summary(e)}')
             return self._format_result("capability", e)
 
     def __str__(self):
@@ -164,7 +164,7 @@ class GetWorker(BaseUnaryWorker):
                 return self._format_result("get", result)
                 
         except Exception as e:
-            logger.error(f'[Worker(Get) {self.target_ip}] Error: {e}')
+            logger.error(f'[Worker(Get) {self.target_ip}] Error: {format_error_summary(e)}')
             return self._format_result("get", e)
 
     def __str__(self):
@@ -235,7 +235,7 @@ class SetWorker(BaseUnaryWorker):
                     result = client.execute_set(self.operation)
                 return self._format_result("set", result)
         except Exception as e:
-            logger.error(f"[Worker(Set) {self.target_ip}] Error: {e}")
+            logger.error(f"[Worker(Set) {self.target_ip}] Error: {format_error_summary(e)}")
             return self._format_result("set", e)
 
     def __str__(self):
@@ -258,7 +258,7 @@ class TransactionWorker(BaseUnaryWorker):
                     raise UnsupportedOperationError(f"Client does not support transaction operations: {client}")
                 return self._format_result("transaction", result)
         except Exception as e:
-            logger.error(f"[Worker(Transaction) {self.target_ip}] Error: {e}")
+            logger.error(f"[Worker(Transaction) {self.target_ip}] Error: {format_error_summary(e)}")
             return self._format_result("transaction", e)
 
     def __str__(self):
@@ -286,7 +286,7 @@ class SequentialWorker(BaseUnaryWorker):
                         if isinstance(res, Exception):
                             is_err = True
                     except Exception as e:
-                        logger.error(f"[Worker(Sequential) {self.target_ip}] {log_pfx}Error in operation '{rpc_name}': {e}")
+                        logger.error(f"[Worker(Sequential) {self.target_ip}] {log_pfx}Error in operation '{rpc_name}': {format_error_summary(e)}")
                         res = e
                         is_err = True
                     results.append(self._format_single_result(rpc_name, res, op=op))
@@ -296,7 +296,7 @@ class SequentialWorker(BaseUnaryWorker):
                         )
                         break
         except Exception as e:
-            logger.error(f"[Worker(Sequential) {self.target_ip}] Session connection error: {e}")
+            logger.error(f"[Worker(Sequential) {self.target_ip}] Session connection error: {format_error_summary(e)}")
             results.append(self._format_single_result("error", e))
 
         if len(results) == 1:

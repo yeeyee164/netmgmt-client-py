@@ -386,8 +386,7 @@ class GNMIClient(BaseClient):
                 continue
             except GeneratorExit:
                 break
-            except Exception as e:
-                logger.error(f"[GNMIClient] Subscription generator error: {e}")
+            except Exception:
                 break
 
     def execute_subscribe(
@@ -435,7 +434,6 @@ class GNMIClient(BaseClient):
         except grpc.RpcError as e:
             if context.is_cancelled:
                 return
-            logger.error(f"[GNMIClient] gNMI Subscribe RPC error: {e}")
             yield StreamEvent(
                 protocol="gnmi",
                 timestamp=time.time(),
@@ -445,7 +443,6 @@ class GNMIClient(BaseClient):
         except Exception as e:
             if context.is_cancelled:
                 return
-            logger.error(f"[GNMIClient] gNMI Subscribe error: {e}")
             yield StreamEvent(
                 protocol="gnmi",
                 timestamp=time.time(),
@@ -689,14 +686,8 @@ class GNMIClient(BaseClient):
             upd_obj.path.CopyFrom(parse_path(p))
             upd_obj.val.CopyFrom(self._build_typed_val(v, encoding=enc, val_type=val_type))
 
-        try:
-            response = self.stub.Set(request, metadata=self.metadata)
-            return response
-        except grpc.RpcError as e:
-            code = e.code() if hasattr(e, 'code') else 'UNKNOWN'
-            details = e.details() if hasattr(e, 'details') else str(e)
-            logger.error(f"[Client] gNMI Set RPC failed: code={code}, details={details}")
-            raise
+        response = self.stub.Set(request, metadata=self.metadata)
+        return response
 
     def _build_subscribe_request(self, config: dict) -> gnmi_pb2.SubscribeRequest:
         """ Constructs the SubscribeRequest object """
@@ -748,8 +739,7 @@ class GNMIClient(BaseClient):
                         poll_req = gnmi_pb2.SubscribeRequest()
                         poll_req.poll.SetInParent()
                         yield poll_req
-            except Exception as e:
-                logger.error(f"[Client] Exception in pb_generator: {e}")
+            except Exception:
                 if self.debug:
                     import traceback
                     traceback.print_exc()

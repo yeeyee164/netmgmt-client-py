@@ -5,7 +5,7 @@ import queue
 from typing import Optional, Any
 
 from managers.factory import ClientFactory
-from util.utils import str_to_bytes
+from util.utils import str_to_bytes, format_error_summary
 from config.model import SessionConfig
 from config.operations import SubscribeOperation
 from config.delivery import DeliveryMode
@@ -96,7 +96,9 @@ class SubscribeSession:
     def _handle_stream_event(self, event: StreamEvent) -> None:
         """Processes incoming StreamEvent and forwards structured message to data_queue."""
         if event.error is not None:
-            logger.error(f"[Worker {self.session_id} | {self.target_ip}] Stream event error: {event.error}")
+            self.last_error = str(event.error)
+            summary = format_error_summary(event.error)
+            logger.error(f"[Worker {self.session_id} | {self.target_ip}] Stream event error: {summary}")
             self._enqueue_item({
                 'session_id': self.session_id,
                 'target': self.target,
@@ -169,7 +171,8 @@ class SubscribeSession:
         except Exception as e:
             self.last_error = str(e)
             if not self.stream_context.is_cancelled:
-                logger.error(f"[Worker {self.session_id} | {self.target_ip}] Error in '{self.subscription_name}': {e}")
+                summary = format_error_summary(e)
+                logger.error(f"[Worker {self.session_id} | {self.target_ip}] Error in '{self.subscription_name}': {summary}")
         finally:
             self.is_running = False
             logger.info(f"[Worker {self.session_id} | {self.target_ip}] Disconnected from '{self.subscription_name}'.")

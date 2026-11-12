@@ -553,18 +553,10 @@ class NetconfClient(BaseClient):
             )
 
     def lock(self, target: str = "candidate") -> Any:
-        try:
-            return self.session.lock(target=target)
-        except RPCError as e:
-            logger.error(f"[NetconfClient] lock({target}) failed: {e}")
-            raise
+        return self.session.lock(target=target)
 
     def unlock(self, target: str = "candidate") -> Any:
-        try:
-            return self.session.unlock(target=target)
-        except RPCError as e:
-            logger.error(f"[NetconfClient] unlock({target}) failed: {e}")
-            raise
+        return self.session.unlock(target=target)
 
     def commit(
         self,
@@ -585,37 +577,21 @@ class NetconfClient(BaseClient):
         if persist_id:
             kwargs["persist_id"] = persist_id
 
-        try:
-            return self.session.commit(**kwargs)
-        except RPCError as e:
-            logger.error(f"[NetconfClient] commit failed: {e}")
-            raise
+        return self.session.commit(**kwargs)
 
     def cancel_commit(self, persist_id: Optional[str] = None) -> Any:
         self._check_capability(":candidate")
         self._check_capability(":confirmed-commit")
         kwargs = {"persist_id": persist_id} if persist_id else {}
-        try:
-            return self.session.cancel_commit(**kwargs)
-        except RPCError as e:
-            logger.error(f"[NetconfClient] cancel-commit failed: {e}")
-            raise
+        return self.session.cancel_commit(**kwargs)
 
     def discard_changes(self) -> Any:
         self._check_capability(":candidate")
-        try:
-            return self.session.discard_changes()
-        except RPCError as e:
-            logger.error(f"[NetconfClient] discard-changes failed: {e}")
-            raise
+        return self.session.discard_changes()
 
     def validate(self, source: str = "candidate") -> Any:
         self._check_capability(":validate")
-        try:
-            return self.session.validate(source=source)
-        except RPCError as e:
-            logger.error(f"[NetconfClient] validate({source}) failed: {e}")
-            raise
+        return self.session.validate(source=source)
 
     def set(self,
             updates: Optional[list] = None,
@@ -908,7 +884,8 @@ class NetconfClient(BaseClient):
                 err = getattr(reply, 'error', 'Unknown error')
                 raise RPCError(f"create-subscription failed: {err}")
         except Exception as e:
-            logger.error(f"[NetconfClient {self.target}] create-subscription error: {e}")
+            if context.is_cancelled:
+                return
             yield StreamEvent(protocol="netconf", timestamp=time.time(), raw_payload=None, error=e)
             return
 
@@ -953,7 +930,6 @@ class NetconfClient(BaseClient):
             except Exception as e:
                 if context.is_cancelled:
                     break
-                logger.error(f"[NetconfClient {self.target}] Error reading notification: {e}")
                 yield StreamEvent(protocol="netconf", timestamp=time.time(), raw_payload=None, error=e)
                 break
 
