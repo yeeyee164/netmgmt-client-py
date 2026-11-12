@@ -50,3 +50,43 @@ def read_payload(value: str) -> str:
         except Exception as e:
             print(f"[CLI Warning] Failed to read payload file '{value}': {e}")
     return value
+
+
+def format_error_summary(error: object) -> str:
+    """
+    Extracts a concise, single-line error summary from an Exception or error object.
+
+    Handles gRPC RpcError (status code + details), NETCONF RPCError (tag + message),
+    and standard Python Exceptions without multi-line traceback dumps.
+    """
+    if error is None:
+        return ""
+
+    # 1. gRPC RpcError handling
+    code = getattr(error, 'code', None)
+    details = getattr(error, 'details', None)
+    if callable(code):
+        try:
+            code_val = code()
+            code_name = getattr(code_val, 'name', str(code_val))
+            det_val = details() if callable(details) else ""
+            if code_name and det_val:
+                return f"{code_name}: {det_val.strip()}"
+            if det_val:
+                return det_val.strip()
+            if code_name:
+                return code_name
+        except Exception:
+            pass
+
+    # 2. NETCONF RPCError handling
+    tag = getattr(error, 'tag', None)
+    msg = getattr(error, 'message', None)
+    if tag or msg:
+        tag_str = f"[{tag}] " if tag else ""
+        return f"NETCONF RPCError {tag_str}{msg or str(error)}".strip()
+
+    # 3. Fallback: single-line sanitized string
+    err_str = str(error).strip()
+    lines = [line.strip() for line in err_str.splitlines() if line.strip()]
+    return " - ".join(lines) if lines else type(error).__name__

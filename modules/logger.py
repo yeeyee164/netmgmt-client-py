@@ -22,7 +22,7 @@ def setup_logger(log_level: str = "INFO", syslog_server: str = "", log_file: str
     formatter = logging.Formatter('%(asctime)s - %(name)s - [%(levelname)s] - %(message)s')
     
     # 1. Console Stream Handler (replaces standard print)
-    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
     
