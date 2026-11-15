@@ -18,6 +18,7 @@ from application.devices import DeviceRegistryService
 from application.operations import DeviceOperationService
 from application.exceptions import (
     InvalidRequestError,
+    PermissionDeniedError,
     SubscriptionNotFoundError,
     UnsupportedProtocolError,
 )
@@ -72,6 +73,7 @@ class ManagedSubscription:
         worker: SubscribeSession,
         thread: threading.Thread,
         data_queue: queue.Queue,
+        owner_id: Optional[str] = None,
     ):
         """
         Initializes a `ManagedSubscription` tracking record.
@@ -84,6 +86,7 @@ class ManagedSubscription:
             worker: `SubscribeSession` worker instance.
             thread: Background execution thread.
             data_queue: Thread-safe Queue receiving `StreamEvent` payloads.
+            owner_id: Optional authenticated owner identifier for multi-caller isolation.
         """
         self.subscription_id = subscription_id
         self.target = target
@@ -92,6 +95,7 @@ class ManagedSubscription:
         self.worker = worker
         self.thread = thread
         self.data_queue = data_queue
+        self.owner_id = owner_id
         self.created_at = time.time()
         self.stopped_at: Optional[float] = None
         self.state = SubscriptionState.STARTING
@@ -166,6 +170,8 @@ class SubscriptionService:
         request: ExecutionRequestDTO,
         queue_size: int = 1000,
         shared_queue: Optional[queue.Queue] = None,
+        *,
+        owner_id: Optional[str] = None,
     ) -> str:
         """
         Starts a streaming telemetry session in a managed background daemon thread.
@@ -225,6 +231,7 @@ class SubscriptionService:
             worker=worker,
             thread=worker_thread,
             data_queue=event_queue,
+            owner_id=owner_id,
         )
 
         with self._lock:
@@ -237,6 +244,8 @@ class SubscriptionService:
         subscription_id: str,
         timeout: float = 1.0,
         max_events: int = 10,
+        *,
+        owner_id: Optional[str] = None,
     ) -> List[StreamEventDTO]:
         """
         Retrieves up to max_events from the subscription event queue without blocking indefinitely.
@@ -245,14 +254,16 @@ class SubscriptionService:
             subscription_id: Unique subscription ID token.
             timeout: Maximum seconds to block waiting for the first event (default: 1.0).
             max_events: Maximum number of buffered events to drain in this call (default: 10).
+            owner_id: Optional caller identifier for ownership verification.
 
         Returns:
             List of `StreamEventDTO` instances (empty if queue was empty within timeout).
 
         Raises:
             SubscriptionNotFoundError: If subscription_id is not active or recognized.
+            PermissionDeniedError: If `owner_id` does not match the subscription owner.
         """
-        managed = self._get_managed(subscription_id)
+        managed = self._get_managed(subscription_id, owner_id=owner_id)
         events: List[StreamEventDTO] = []
 
         try:
@@ -277,6 +288,8 @@ class SubscriptionService:
         self,
         subscription_id: str,
         timeout: float = 1.0,
+        *,
+        owner_id: Optional[str] = None,
     ) -> Iterator[StreamEventDTO]:
         """
         Generator yielding streaming telemetry events while the subscription remains active.
@@ -287,14 +300,16 @@ class SubscriptionService:
         Args:
             subscription_id: Unique subscription ID token.
             timeout: Maximum seconds to wait per queue get attempt (default: 1.0).
+            owner_id: Optional caller identifier for ownership verification.
 
         Yields:
             `StreamEventDTO` instances.
 
         Raises:
             SubscriptionNotFoundError: If subscription_id is not active or recognized.
+            PermissionDeniedError: If `owner_id` does not match the subscription owner.
         """
-        managed = self._get_managed(subscription_id)
+        managed = self._get_managed(subscription_id, owner_id=owner_id)
         while managed.is_alive or not managed.data_queue.empty():
             try:
                 item = managed.data_queue.get(timeout=timeout)
@@ -303,42 +318,63 @@ class SubscriptionService:
             except queue.Empty:
                 continue
 
-    def send_command(self, subscription_id: str, command: str) -> None:
+    def send_command(
+        self,
+        subscription_id: str,
+        command: str,
+        *,
+        owner_id: Optional[str] = None,
+    ) -> None:
         """
         Dispatches control commands ('poll', 'stop') to an active subscription.
 
         Args:
             subscription_id: Unique subscription ID token.
             command: Control command string ('poll' to trigger an on-demand update, 'stop' to cancel).
+            owner_id: Optional caller identifier for ownership verification.
 
         Raises:
             InvalidRequestError: If command is not recognized ('poll' or 'stop').
             SubscriptionNotFoundError: If subscription_id is not active.
+            PermissionDeniedError: If `owner_id` does not match the subscription owner.
         """
-        managed = self._get_managed(subscription_id)
+        managed = self._get_managed(subscription_id, owner_id=owner_id)
         cmd = command.strip().lower()
         if cmd == "poll":
             managed.worker.trigger_poll()
         elif cmd == "stop":
-            self.stop_subscription(subscription_id)
+            self.stop_subscription(subscription_id, owner_id=owner_id)
         else:
             raise InvalidRequestError(f"Unsupported subscription command '{command}'.")
 
-    def stop_subscription(self, subscription_id: str) -> bool:
+    def stop_subscription(
+        self,
+        subscription_id: str,
+        *,
+        owner_id: Optional[str] = None,
+    ) -> bool:
         """
         Terminates a subscription, cancels underlying streams, and cleans up resources.
 
         Args:
             subscription_id: Unique subscription ID token to terminate.
+            owner_id: Optional caller identifier for ownership verification.
 
         Returns:
             True if the subscription was found and stopped; False if already terminated or not found.
+
+        Raises:
+            PermissionDeniedError: If `owner_id` does not match the subscription owner.
         """
         with self._lock:
-            managed = self._active_subscriptions.pop(subscription_id, None)
-
-        if managed is None:
-            return False
+            managed = self._active_subscriptions.get(subscription_id)
+            if managed is None:
+                return False
+            if owner_id is not None and managed.owner_id is not None and managed.owner_id != owner_id:
+                raise PermissionDeniedError(
+                    f"Caller '{owner_id}' is not authorized to stop subscription '{subscription_id}'."
+                )
+            self._active_subscriptions.pop(subscription_id, None)
 
         managed.state = SubscriptionState.STOPPING
         managed.worker.stop()
@@ -353,13 +389,20 @@ class SubscriptionService:
         managed.stopped_at = time.time()
         return True
 
-    def list_active_subscriptions(self) -> List[Dict[str, Any]]:
+    def list_active_subscriptions(
+        self,
+        *,
+        owner_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Returns metadata for all running subscriptions and purges terminated entries.
 
+        Args:
+            owner_id: Optional caller identifier to filter returned subscriptions.
+
         Returns:
             List of dictionaries containing subscription metadata (ID, target, protocol,
-            state, creation/stopped timestamps, and error diagnostics).
+            state, creation/stopped timestamps, owner_id, and error diagnostics).
         """
         with self._lock:
             # Purge dead threads
@@ -373,6 +416,7 @@ class SubscriptionService:
                     "target": m.target,
                     "protocol": m.protocol,
                     "subscription_name": m.subscription_name,
+                    "owner_id": m.owner_id,
                     "created_at": m.created_at,
                     "stopped_at": m.stopped_at,
                     "is_alive": m.is_alive,
@@ -380,53 +424,69 @@ class SubscriptionService:
                     "error": m.error,
                 }
                 for m in self._active_subscriptions.values()
+                if owner_id is None or m.owner_id == owner_id
             ]
 
-    def is_poll_subscription(self, subscription_id: str) -> bool:
+    def is_poll_subscription(
+        self,
+        subscription_id: str,
+        *,
+        owner_id: Optional[str] = None,
+    ) -> bool:
         """
         Checks if the subscription operates in `ON_DEMAND (poll)` mode.
 
         Args:
             subscription_id: Unique subscription ID token.
+            owner_id: Optional caller identifier for ownership verification.
 
         Returns:
             True if configured for polling; False for periodic/on-change streaming.
 
         Raises:
             SubscriptionNotFoundError: If subscription_id is not found.
+            PermissionDeniedError: If `owner_id` does not match the subscription owner.
         """
-        managed = self._get_managed(subscription_id)
+        managed = self._get_managed(subscription_id, owner_id=owner_id)
         return bool(
             getattr(managed.worker, "is_poll_mode", lambda: False)()
             or getattr(managed.worker, "kwargs", {}).get("mode", "").lower() == "poll"
         )
 
-    def get_subscription_info(self, subscription_id: str) -> Dict[str, Any]:
+    def get_subscription_info(
+        self,
+        subscription_id: str,
+        *,
+        owner_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Returns detailed status metadata for a specific active subscription.
 
         Args:
             subscription_id: Unique subscription ID token.
+            owner_id: Optional caller identifier for ownership verification.
 
         Returns:
-            Dictionary containing target, protocol, state, thread liveness, and error details.
+            Dictionary containing target, protocol, state, thread liveness, owner_id, and error details.
 
         Raises:
             SubscriptionNotFoundError: If subscription_id is not found.
+            PermissionDeniedError: If `owner_id` does not match the subscription owner.
         """
-        managed = self._get_managed(subscription_id)
+        managed = self._get_managed(subscription_id, owner_id=owner_id)
         return {
             "subscription_id": managed.subscription_id,
             "session_id": getattr(managed.worker, "session_id", managed.subscription_id),
             "target": managed.target,
             "protocol": managed.protocol,
             "subscription_name": managed.subscription_name,
+            "owner_id": managed.owner_id,
             "created_at": managed.created_at,
             "stopped_at": managed.stopped_at,
             "is_alive": managed.is_alive,
             "state": managed.state.value,
             "error": managed.error,
-            "is_poll_mode": self.is_poll_subscription(subscription_id),
+            "is_poll_mode": self.is_poll_subscription(subscription_id, owner_id=owner_id),
         }
 
     def has_active_threads(self) -> bool:
@@ -448,23 +508,34 @@ class SubscriptionService:
         for sid in sub_ids:
             self.stop_subscription(sid)
 
-    def _get_managed(self, subscription_id: str) -> ManagedSubscription:
+    def _get_managed(
+        self,
+        subscription_id: str,
+        *,
+        owner_id: Optional[str] = None,
+    ) -> ManagedSubscription:
         """
         Internal lookup for an active `ManagedSubscription` record.
 
         Args:
             subscription_id: Subscription UUID string.
+            owner_id: Optional caller identifier for ownership verification.
 
         Returns:
             `ManagedSubscription` instance.
 
         Raises:
             SubscriptionNotFoundError: If subscription_id is not found in active subscriptions.
+            PermissionDeniedError: If `owner_id` does not match the subscription owner.
         """
         with self._lock:
             managed = self._active_subscriptions.get(subscription_id)
             if managed is None:
                 raise SubscriptionNotFoundError(f"Active subscription '{subscription_id}' not found.")
+            if owner_id is not None and managed.owner_id is not None and managed.owner_id != owner_id:
+                raise PermissionDeniedError(
+                    f"Caller '{owner_id}' is not authorized to access subscription '{subscription_id}'."
+                )
             return managed
 
     def _to_dto(self, item: Dict[str, Any], managed: ManagedSubscription) -> StreamEventDTO:

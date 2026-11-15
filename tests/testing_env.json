@@ -42,5 +42,19 @@
             "yang_module" : ["ipi-streaming-telemetry", "ipi-interface"],
             "timeout" : 15
         }
+    },
+    "netopeer2": {
+        "credentials" : {
+            "user" : "root",
+            "password" : "root"
+        },
+        "protocols": {
+            "netconf" : "172.20.20.4:830"
+        },
+        "yang": {
+            "yang_path" : "../yang/netopeer2",
+            "yang_module" : ["ietf-netconf-notifications", "ietf-system"],
+            "timeout" : 15
+        }
     }
 }

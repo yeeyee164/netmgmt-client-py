@@ -518,6 +518,28 @@ class StreamEventDTO:
     error: Optional[str] = None
 
 
+@dataclass(kw_only=True)
+class SessionInfoDTO:
+    """
+    Safe metadata describing a managed logical device session.
+
+    Exposes lifecycle timestamps, ownership, and protocol transaction metadata
+    without leaking raw transport clients, sockets, or credentials.
+    """
+    session_id: str
+    device_id: Optional[str] = None
+    target: str
+    protocol: str
+    owner_id: str
+    state: str
+    created_at: float
+    last_activity: float
+    expires_at: float
+    in_use: bool = False
+    locked_datastores: list[str] = field(default_factory=list)
+    has_uncommitted_changes: bool = False
+
+
 def expand_request_repetitions(
     requests: Sequence[ExecutionRequestDTO],
 ) -> list[ExecutionRequestDTO]:
