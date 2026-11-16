@@ -51,13 +51,19 @@ class SchemaDB:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn = sqlite3.connect(
+            str(self.db_path),
+            timeout=30.0,
+            check_same_thread=False,
+        )
         self._conn.row_factory = sqlite3.Row
         self._init_tables()
 
     def _init_tables(self) -> None:
         with self._lock:
             cursor = self._conn.cursor()
+            cursor.execute("PRAGMA busy_timeout = 5000;")
+            cursor.execute("PRAGMA journal_mode = WAL;")
             cursor.execute("PRAGMA foreign_keys = ON;")
             cursor.executescript(
                 """

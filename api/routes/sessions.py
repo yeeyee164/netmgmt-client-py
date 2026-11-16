@@ -67,9 +67,13 @@ async def create_device_session(
 async def list_sessions(
     principal: Principal = Depends(get_current_principal),
     session_manager: DeviceSessionManager = Depends(get_session_manager),
+    limiter: anyio.CapacityLimiter = Depends(get_rpc_limiter),
 ) -> list[SessionInfoResponseSchema]:
     """Lists active logical sessions owned by the authenticated caller."""
-    sessions = session_manager.list_sessions(owner_id=principal.owner_id)
+    sessions = await anyio.to_thread.run_sync(
+        partial(session_manager.list_sessions, owner_id=principal.owner_id),
+        limiter=limiter,
+    )
     return [to_session_info_response(s) for s in sessions]
 
 
@@ -78,9 +82,13 @@ async def get_session(
     session_id: str,
     principal: Principal = Depends(get_current_principal),
     session_manager: DeviceSessionManager = Depends(get_session_manager),
+    limiter: anyio.CapacityLimiter = Depends(get_rpc_limiter),
 ) -> SessionInfoResponseSchema:
     """Inspects metadata for a caller-owned managed logical session."""
-    info = session_manager.get_session_info(session_id, owner_id=principal.owner_id)
+    info = await anyio.to_thread.run_sync(
+        partial(session_manager.get_session_info, session_id, owner_id=principal.owner_id),
+        limiter=limiter,
+    )
     return to_session_info_response(info)
 
 

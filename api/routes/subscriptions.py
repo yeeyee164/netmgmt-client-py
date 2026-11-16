@@ -171,11 +171,10 @@ async def stream_subscription_websocket(
     underlying `SubscriptionService` stream.
     """
     subscription_service: SubscriptionService = websocket.app.state.subscription_service
-    limiter: anyio.CapacityLimiter = websocket.app.state.rpc_limiter
 
     try:
         principal = authenticate_websocket(websocket)
-        subscription_service.get_subscription_info(
+        consumer_id = subscription_service.open_consumer(
             subscription_id, owner_id=principal.owner_id
         )
     except (APIAuthenticationError, PermissionDeniedError):
@@ -204,13 +203,14 @@ async def stream_subscription_websocket(
                 try:
                     events = await anyio.to_thread.run_sync(
                         partial(
-                            subscription_service.get_events,
+                            subscription_service.get_consumer_events,
                             subscription_id,
+                            consumer_id,
                             timeout=0.1,
                             max_events=25,
                             owner_id=principal.owner_id,
                         ),
-                        limiter=limiter,
+                        abandon_on_cancel=True,
                     )
                 except SubscriptionNotFoundError:
                     await websocket.close(code=1000)
@@ -228,13 +228,14 @@ async def stream_subscription_websocket(
                             # Drain any last buffered events before closing
                             tail = await anyio.to_thread.run_sync(
                                 partial(
-                                    subscription_service.get_events,
+                                    subscription_service.get_consumer_events,
                                     subscription_id,
+                                    consumer_id,
                                     timeout=0.05,
                                     max_events=50,
                                     owner_id=principal.owner_id,
                                 ),
-                                limiter=limiter,
+                                abandon_on_cancel=True,
                             )
                             for event in tail:
                                 await websocket.send_json(
@@ -251,6 +252,9 @@ async def stream_subscription_websocket(
             # Never call subscription_service.stop_subscription() on consumer detach.
             task_group.cancel_scope.cancel()
 
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(_watch_client_disconnect, tg)
-        tg.start_soon(_forward_subscription_events, tg)
+    try:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_watch_client_disconnect, tg)
+            tg.start_soon(_forward_subscription_events, tg)
+    finally:
+        subscription_service.close_consumer(consumer_id)

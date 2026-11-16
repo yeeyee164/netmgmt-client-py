@@ -24,6 +24,92 @@ from application.exceptions import (
 )
 from managers.subscribe_session import SubscribeSession
 
+_STOP_SENTINEL = object()
+
+
+class _ConsumerQueue(queue.Queue):
+    """Per-consumer bounded queue carrying a close flag for immediate stream wakeups."""
+
+    def __init__(self, maxsize: int = 0):
+        super().__init__(maxsize=maxsize)
+        self.closed: bool = False
+
+
+class FanoutQueue(queue.Queue):
+    """
+    Thread-safe queue supporting both single-buffer pre-attach reads and
+    multi-consumer non-blocking broadcast fan-out with per-consumer DROP_OLDEST overflow.
+    """
+
+    def __init__(self, maxsize: int = 1000):
+        super().__init__(maxsize=maxsize)
+        self._fanout_lock = threading.Lock()
+        self._consumers: Dict[str, _ConsumerQueue] = {}
+        self._closed: bool = False
+
+    @staticmethod
+    def _drop_oldest_and_put(q: queue.Queue, item: Any) -> None:
+        try:
+            queue.Queue.put(q, item, block=False)
+        except queue.Full:
+            try:
+                _ = queue.Queue.get_nowait(q)
+                q.task_done()
+            except (queue.Empty, ValueError):
+                pass
+            try:
+                queue.Queue.put(q, item, block=False)
+            except queue.Full:
+                pass
+
+    def put(self, item: Any, block: bool = True, timeout: Optional[float] = None) -> None:
+        with self._fanout_lock:
+            if self._closed:
+                return
+            if not self._consumers:
+                self._drop_oldest_and_put(self, item)
+                return
+            for cq in self._consumers.values():
+                self._drop_oldest_and_put(cq, item)
+
+    def put_nowait(self, item: Any) -> None:
+        self.put(item, block=False)
+
+    def register_consumer(self, consumer_id: str) -> _ConsumerQueue:
+        with self._fanout_lock:
+            cq = _ConsumerQueue(maxsize=self.maxsize)
+            if not self._consumers:
+                # Drain any pre-buffered events into the first attached consumer.
+                while True:
+                    try:
+                        buffered = queue.Queue.get_nowait(self)
+                        self.task_done()
+                    except (queue.Empty, ValueError):
+                        break
+                    self._drop_oldest_and_put(cq, buffered)
+            if self._closed:
+                cq.closed = True
+                try:
+                    queue.Queue.put(cq, _STOP_SENTINEL, block=False)
+                except queue.Full:
+                    pass
+            self._consumers[consumer_id] = cq
+            return cq
+
+    def unregister_consumer(self, consumer_id: str) -> None:
+        with self._fanout_lock:
+            self._consumers.pop(consumer_id, None)
+
+    def close(self) -> None:
+        with self._fanout_lock:
+            self._closed = True
+            for cq in self._consumers.values():
+                cq.closed = True
+                try:
+                    queue.Queue.put(cq, _STOP_SENTINEL, block=False)
+                except queue.Full:
+                    pass
+
 
 class SubscriptionState(str, Enum):
     """
@@ -164,6 +250,7 @@ class SubscriptionService:
         self._op_service = operation_service or DeviceOperationService(device_registry=self._registry)
         self._lock = threading.RLock()
         self._active_subscriptions: Dict[str, ManagedSubscription] = {}
+        self._consumer_records: Dict[str, tuple[ManagedSubscription, queue.Queue]] = {}
 
     def start_subscription(
         self,
@@ -208,7 +295,9 @@ class SubscriptionService:
         sub_name = getattr(session_cfg.operation, "subscription_name", "sub")
 
         subscription_id = str(uuid.uuid4())
-        event_queue: queue.Queue = shared_queue if shared_queue is not None else queue.Queue(maxsize=queue_size)
+        event_queue: queue.Queue = (
+            shared_queue if shared_queue is not None else FanoutQueue(maxsize=queue_size)
+        )
 
         worker = SubscribeSession(
             config=session_cfg,
@@ -264,25 +353,107 @@ class SubscriptionService:
             PermissionDeniedError: If `owner_id` does not match the subscription owner.
         """
         managed = self._get_managed(subscription_id, owner_id=owner_id)
+        events, _ = self._drain_queue_events(
+            managed.data_queue, managed, timeout=timeout, max_events=max_events
+        )
+        return events
+
+    def open_consumer(
+        self,
+        subscription_id: str,
+        *,
+        owner_id: Optional[str] = None,
+    ) -> str:
+        """
+        Registers an isolated consumer cursor on an active subscription for broadcast delivery.
+        """
+        managed = self._get_managed(subscription_id, owner_id=owner_id)
+        consumer_id = str(uuid.uuid4())
+        if isinstance(managed.data_queue, FanoutQueue):
+            cq: queue.Queue = managed.data_queue.register_consumer(consumer_id)
+        else:
+            cq = managed.data_queue
+        with self._lock:
+            self._consumer_records[consumer_id] = (managed, cq)
+        return consumer_id
+
+    def get_consumer_events(
+        self,
+        subscription_id: str,
+        consumer_id: str,
+        timeout: float = 0.1,
+        max_events: int = 25,
+        *,
+        owner_id: Optional[str] = None,
+    ) -> List[StreamEventDTO]:
+        """
+        Drains up to max_events from a registered broadcast consumer queue.
+        """
+        with self._lock:
+            entry = self._consumer_records.get(consumer_id)
+        if entry is None:
+            raise SubscriptionNotFoundError(
+                f"Consumer '{consumer_id}' for subscription '{subscription_id}' not found."
+            )
+        managed, cq = entry
+        if managed.subscription_id != subscription_id:
+            raise SubscriptionNotFoundError(
+                f"Consumer '{consumer_id}' does not belong to subscription '{subscription_id}'."
+            )
+        if owner_id is not None and managed.owner_id is not None and managed.owner_id != owner_id:
+            raise PermissionDeniedError(
+                f"Caller '{owner_id}' is not authorized to access subscription '{subscription_id}'."
+            )
+        if cq.empty() and getattr(cq, "closed", False):
+            raise SubscriptionNotFoundError(f"Active subscription '{subscription_id}' closed.")
+
+        events, hit_close = self._drain_queue_events(
+            cq, managed, timeout=timeout, max_events=max_events
+        )
+        if not events and (hit_close or (cq.empty() and getattr(cq, "closed", False))):
+            raise SubscriptionNotFoundError(f"Active subscription '{subscription_id}' closed.")
+        return events
+
+    def close_consumer(self, consumer_id: str) -> None:
+        """Detaches and cleans up a registered broadcast consumer without stopping the subscription."""
+        with self._lock:
+            entry = self._consumer_records.pop(consumer_id, None)
+        if entry is None:
+            return
+        managed, _ = entry
+        if isinstance(managed.data_queue, FanoutQueue):
+            managed.data_queue.unregister_consumer(consumer_id)
+
+    def _drain_queue_events(
+        self,
+        event_queue: queue.Queue,
+        managed: ManagedSubscription,
+        timeout: float,
+        max_events: int,
+    ) -> tuple[List[StreamEventDTO], bool]:
+        """Drains up to max_events from event_queue and reports whether a close sentinel was hit."""
         events: List[StreamEventDTO] = []
-
+        hit_close = False
         try:
-            first_item = managed.data_queue.get(timeout=timeout)
+            first_item = event_queue.get(timeout=timeout)
+            event_queue.task_done()
+            if first_item is _STOP_SENTINEL:
+                return [], True
             events.append(self._to_dto(first_item, managed))
-            managed.data_queue.task_done()
 
-            # Drain any additional pending items up to max_events
             while len(events) < max_events:
                 try:
-                    item = managed.data_queue.get_nowait()
+                    item = event_queue.get_nowait()
+                    event_queue.task_done()
+                    if item is _STOP_SENTINEL:
+                        hit_close = True
+                        break
                     events.append(self._to_dto(item, managed))
-                    managed.data_queue.task_done()
                 except queue.Empty:
                     break
         except queue.Empty:
             pass
-
-        return events
+        return events, hit_close
 
     def consume_events_generator(
         self,
@@ -377,6 +548,8 @@ class SubscriptionService:
             self._active_subscriptions.pop(subscription_id, None)
 
         managed.state = SubscriptionState.STOPPING
+        if isinstance(managed.data_queue, FanoutQueue):
+            managed.data_queue.close()
         managed.worker.stop()
         if hasattr(managed.worker, "is_running"):
             try:

@@ -9,11 +9,14 @@ against Nokia SRLinux (172.20.20.2), Arista cEOS (172.20.20.3), and
 Netopeer2 (172.20.20.4).
 """
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import socket
 import time
 
 from fastapi.testclient import TestClient
+import httpx
 import pytest
 
 from api.deps import APISettings
@@ -355,3 +358,237 @@ def test_schema_catalog_statistics_after_discovery(api_client: TestClient):
     assert resp.status_code == 200
     body = resp.json()
     assert isinstance(body["statistics"], dict)
+
+
+def test_concurrent_multivendor_fanout_and_schema_reads(api_client: TestClient):
+    """Executes concurrent HTTP requests across SRLinux, cEOS, Netopeer2, and schema DB reads."""
+    for host, port in (
+        ("172.20.20.2", 57401),
+        ("172.20.20.2", 830),
+        ("172.20.20.3", 6030),
+        ("172.20.20.4", 830),
+    ):
+        _require_reachable(host, port)
+
+    async def _run_fanout():
+        transport = httpx.ASGITransport(app=api_client.app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", timeout=30.0
+        ) as ac:
+            tasks = [
+                ac.post(
+                    "/api/v1/operations/execute",
+                    headers=_OP_A_HEADERS,
+                    json={
+                        "device_id": "srlinux_gnmi",
+                        "operations": [
+                            {"op_type": "capabilities"},
+                            {
+                                "op_type": "get",
+                                "paths": ["/system/name/host-name"],
+                                "options": {"encoding": "json_ietf"},
+                            },
+                        ],
+                    },
+                ),
+                ac.post(
+                    "/api/v1/operations/execute",
+                    headers=_OP_A_HEADERS,
+                    json={
+                        "device_id": "srlinux_netconf",
+                        "operations": [{"op_type": "capabilities"}],
+                    },
+                ),
+                ac.post(
+                    "/api/v1/operations/execute",
+                    headers=_OP_A_HEADERS,
+                    json={
+                        "device_id": "ceos",
+                        "operations": [
+                            {"op_type": "capabilities"},
+                            {
+                                "op_type": "get",
+                                "paths": ["/system/config/hostname"],
+                                "options": {"encoding": "json_ietf"},
+                            },
+                        ],
+                    },
+                ),
+                ac.post(
+                    "/api/v1/operations/execute",
+                    headers=_OP_A_HEADERS,
+                    json={
+                        "device_id": "netopeer2",
+                        "operations": [
+                            {"op_type": "capabilities"},
+                            {"op_type": "get_config", "datastore": "running"},
+                        ],
+                    },
+                ),
+                ac.get("/api/v1/schemas/statistics", headers=_OP_A_HEADERS),
+                ac.get("/api/v1/schemas/modules", headers=_OP_A_HEADERS),
+                ac.get("/healthz"),
+            ]
+            return await asyncio.gather(*tasks)
+
+    responses = asyncio.run(_run_fanout())
+    assert all(r.status_code == 200 for r in responses)
+    for op_resp in responses[:4]:
+        assert op_resp.json()["success"] is True
+    assert isinstance(responses[4].json()["statistics"], dict)
+    assert isinstance(responses[5].json(), list)
+    assert responses[6].json() == {"status": "ok"}
+
+
+def test_concurrent_live_gnmi_subscriptions_and_dual_websocket_fanout(
+    api_client: TestClient,
+):
+    """Streams live SRLinux + cEOS subscriptions concurrently with 2 WS consumers on SRLinux."""
+    _require_reachable("172.20.20.2", 57401)
+    _require_reachable("172.20.20.3", 6030)
+
+    r_srl = api_client.post(
+        "/api/v1/subscriptions",
+        headers=_OP_A_HEADERS,
+        json={
+            "device_id": "srlinux_gnmi",
+            "operations": [
+                {
+                    "op_type": "subscribe",
+                    "paths": ["/system/name/host-name"],
+                    "telemetry": {"mode": "periodic", "sample_interval_sec": 1.0},
+                    "options": {"encoding": "json_ietf", "subscription_name": "srl-fanout"},
+                }
+            ],
+        },
+    )
+    r_ceos = api_client.post(
+        "/api/v1/subscriptions",
+        headers=_OP_A_HEADERS,
+        json={
+            "device_id": "ceos",
+            "operations": [
+                {
+                    "op_type": "subscribe",
+                    "paths": ["/system/config/hostname"],
+                    "telemetry": {"mode": "periodic", "sample_interval_sec": 1.0},
+                    "options": {"encoding": "json_ietf", "subscription_name": "ceos-fanout"},
+                }
+            ],
+        },
+    )
+    assert r_srl.status_code == 201
+    assert r_ceos.status_code == 201
+    srl_sub = r_srl.json()["subscription_id"]
+    ceos_sub = r_ceos.json()["subscription_id"]
+
+    def _read_updates(sub_id: str):
+        with api_client.websocket_connect(
+            f"/api/v1/subscriptions/{sub_id}/ws?token=token-op-a"
+        ) as ws:
+            events = []
+            for _ in range(4):
+                ev = ws.receive_json()
+                assert ev["error"] is None
+                assert isinstance(ev["data"], dict)
+                events.append(ev)
+                if "updates" in ev["data"]:
+                    break
+            return events
+
+    try:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            f_srl_1 = pool.submit(_read_updates, srl_sub)
+            f_srl_2 = pool.submit(_read_updates, srl_sub)
+            f_ceos = pool.submit(_read_updates, ceos_sub)
+
+            ev_srl_1 = f_srl_1.result(timeout=10.0)
+            ev_srl_2 = f_srl_2.result(timeout=10.0)
+            ev_ceos = f_ceos.result(timeout=10.0)
+
+        assert any("updates" in ev["data"] for ev in ev_srl_1)
+        assert any("updates" in ev["data"] for ev in ev_srl_2)
+        assert any("updates" in ev["data"] for ev in ev_ceos)
+    finally:
+        assert (
+            api_client.delete(
+                f"/api/v1/subscriptions/{srl_sub}", headers=_OP_A_HEADERS
+            ).status_code
+            == 204
+        )
+        assert (
+            api_client.delete(
+                f"/api/v1/subscriptions/{ceos_sub}", headers=_OP_A_HEADERS
+            ).status_code
+            == 204
+        )
+
+
+def test_concurrent_netopeer2_sessions_isolation_and_serialization(
+    api_client: TestClient,
+):
+    """Runs overlapping operations across two owner-isolated Netopeer2 sessions."""
+    _require_reachable("172.20.20.4", 830)
+
+    r_a = api_client.post(
+        "/api/v1/devices/netopeer2/sessions",
+        headers=_OP_A_HEADERS,
+        json={"ttl_seconds": 120.0},
+    )
+    r_b = api_client.post(
+        "/api/v1/devices/netopeer2/sessions",
+        headers=_OP_B_HEADERS,
+        json={"ttl_seconds": 120.0},
+    )
+    assert r_a.status_code == 201
+    assert r_b.status_code == 201
+    sid_a = r_a.json()["session_id"]
+    sid_b = r_b.json()["session_id"]
+
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            f_a1 = pool.submit(
+                api_client.post,
+                f"/api/v1/sessions/{sid_a}/operations",
+                headers=_OP_A_HEADERS,
+                json={"operations": [{"op_type": "get_config", "datastore": "running"}]},
+            )
+            f_a2 = pool.submit(
+                api_client.post,
+                f"/api/v1/sessions/{sid_a}/operations",
+                headers=_OP_A_HEADERS,
+                json={"operations": [{"op_type": "capabilities"}]},
+            )
+            f_b1 = pool.submit(
+                api_client.post,
+                f"/api/v1/sessions/{sid_b}/operations",
+                headers=_OP_B_HEADERS,
+                json={"operations": [{"op_type": "get_config", "datastore": "running"}]},
+            )
+            f_cross = pool.submit(
+                api_client.get,
+                f"/api/v1/sessions/{sid_a}",
+                headers=_OP_B_HEADERS,
+            )
+
+            for ok_fut in (f_a1, f_a2, f_b1):
+                resp = ok_fut.result(timeout=15.0)
+                assert resp.status_code == 200
+                assert resp.json()["success"] is True
+
+            cross_resp = f_cross.result(timeout=10.0)
+            assert cross_resp.status_code == 403
+            assert cross_resp.json()["error_code"] == "PERMISSION_DENIED"
+    finally:
+        assert (
+            api_client.delete(
+                f"/api/v1/sessions/{sid_a}", headers=_OP_A_HEADERS
+            ).status_code
+            == 204
+        )
+        assert (
+            api_client.delete(
+                f"/api/v1/sessions/{sid_b}", headers=_OP_B_HEADERS
+            ).status_code
+            == 204
+        )
