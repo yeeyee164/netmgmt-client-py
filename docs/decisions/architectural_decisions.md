@@ -23,7 +23,7 @@ rejected.
 
 ## ADR-001: Keep the Application Services Layer as the UI boundary
 
-**Status:** Proposed\
+**Status:** Implemented\
 **Decision:** Keep the Application Services Layer between presentation
 adapters and the existing protocol/execution engine.
 
@@ -74,11 +74,11 @@ engine must not depend on a particular GUI framework.
 
 ### Acceptance criteria
 
--   [ ] The web/API adapter does not construct internal workers
+-   [x] The web/API adapter does not construct internal workers
     directly.
--   [ ] CLI and API call the same application use cases where behavior
+-   [x] CLI and API call the same application use cases where behavior
     is shared.
--   [ ] Core protocol/execution modules do not import web framework
+-   [x] Core protocol/execution modules do not import web framework
     modules.
 
 ------------------------------------------------------------------------
@@ -394,7 +394,7 @@ Before exposing writes, define:
 
 ## ADR-010: Introduce a web API incrementally
 
-**Status:** Proposed
+**Status:** Partially Implemented (`api/` v0.1.0 exposes devices, operations, sessions, subscriptions, and schema validation routes; schema browsing per ADR-008 and per-operation RBAC/audit gates per ADR-009 remain pending)
 **Decision:** Build a small read-only API first, then add schema
 browsing, subscriptions, and mutation workflows in stages.
 
@@ -433,9 +433,9 @@ browsing, subscriptions, and mutation workflows in stages.
 
 When modifying this area:
 
-1.  Read this document and `01_findings.md` before changing
+1.  Read this document and `docs/application_service_layer_specification.md` before changing
     application-service behavior.
-2.  Read `02_architectural_concerns.md` when a change affects module
+2.  Read `docs/ASL/architectural_concerns.md` when a change affects module
     boundaries, persistence, schemas, subscriptions, or security.
 3.  Preserve the dependency direction in ADR-001.
 4.  Do not silently change DTO fields or result semantics without

@@ -7,12 +7,17 @@ The test suite of **`netmgnt-client-py`** is bifurcated into two distinct catego
 ```text
 tests/
 ├── conftest.py               # Root test configuration (sys.path injection, path helpers)
+├── testing_env.json          # Lab device endpoints, credentials, and vendor YANG paths
 ├── yang_fetcher.py           # Test utility for dynamic RFC 6022 model gathering
 ├── fixtures/                 # Centralized test payloads and configurations (.yaml, .xml)
-├── yang/                     # Multi-vendor YANG repositories (Nokia SRLinux, IP Infusion OcNOS)
-│   ├── srlinux/
-│   └── ocnos_derived/
-├── unit/                     # Isolated, fast-executing unit test suite
+├── unit/                     # Isolated, fast-executing unit test suite (21 files)
+│   ├── test_api_concurrency.py
+│   ├── test_api_routes.py
+│   ├── test_application_devices.py
+│   ├── test_application_dto.py
+│   ├── test_application_operations.py
+│   ├── test_application_sessions.py
+│   ├── test_application_subscriptions.py
 │   ├── test_config_models.py
 │   ├── test_delivery_mode.py
 │   ├── test_path.py
@@ -27,12 +32,15 @@ tests/
 │   ├── test_schema_validator.py
 │   ├── test_stream_types.py
 │   └── test_validators.py
-└── composite/                # Multi-component integration and pipeline test suite
+└── composite/                # Multi-component integration, pipeline, and live test suite (14 files)
+    ├── test_api_testbed.py
+    ├── test_application_integration.py
     ├── test_cli_schema.py
     ├── test_core_yang_ocnos.py
     ├── test_core_yang_srlinux.py
     ├── test_gnmi_schema_integration.py
     ├── test_gnmi_set.py
+    ├── test_gnmi_subscribe.py
     ├── test_managers.py
     ├── test_netconf_edit_config.py
     ├── test_netconf_schema_integration.py
@@ -52,6 +60,13 @@ tests/
 
 | Test File | Target Subsystem | Scope & Verification |
 | :--- | :--- | :--- |
+| [`test_api_concurrency.py`](unit/test_api_concurrency.py) | `api/` | CapacityLimiter enforcement, WebSocket streaming concurrency, and API isolation. |
+| [`test_api_routes.py`](unit/test_api_routes.py) | `api/` | Health probes, auth/policy checks, device, operation, session, subscription, and schema routes. |
+| [`test_application_devices.py`](unit/test_application_devices.py) | `application/devices.py` | `DeviceRegistryService` CRUD, `testing_env.json` seeding, and endpoint resolution. |
+| [`test_application_dto.py`](unit/test_application_dto.py) | `application/dto.py` | DTO validation, protocol-operation support matrix, and request repetition expansion. |
+| [`test_application_operations.py`](unit/test_application_operations.py) | `application/operations.py` | `DeviceOperationService` unary, batch, validate-only, and session-bound execution. |
+| [`test_application_sessions.py`](unit/test_application_sessions.py) | `application/sessions.py` | `DeviceSessionManager` leasing, lock/commit state tracking, and TTL expiration. |
+| [`test_application_subscriptions.py`](unit/test_application_subscriptions.py) | `application/subscriptions.py` | `SubscriptionService` lifecycle, bounded `FanoutQueue` behavior, and consumer cursors. |
 | [`test_path.py`](unit/test_path.py) | `modules/path.py` | XPath string parsing, keys extraction, gNMI `Path` and `PathElem` generation. |
 | [`test_config_models.py`](unit/test_config_models.py) | `config/model.py`, `config/operations.py` | Immutability, validation logic, and property accessors for `ConnectionConfig`, `SessionConfig`, and `OperationConfig`. |
 | [`test_delivery_mode.py`](unit/test_delivery_mode.py) | `config/delivery.py` | RFC 8641 protocol-neutral delivery mode resolution, case-insensitivity, and validation. |
@@ -76,35 +91,40 @@ tests/
 
 | Test File | Subsystems Integrated | Scope & Verification |
 | :--- | :--- | :--- |
+| [`test_api_testbed.py`](composite/test_api_testbed.py) | `api/`, `application/`, live testbed | Live FastAPI integration against SRLinux, cEOS, and Netopeer2 (via `testing_env.json`). |
+| [`test_application_integration.py`](composite/test_application_integration.py) | `cli/`, `application/`, `managers/` | End-to-end YAML/CLI adapter, `CLIApplicationRunner`, `DeviceOperationService`, and legacy manager compatibility. |
 | [`test_managers.py`](composite/test_managers.py) | `managers/manager.py`, `managers/unary_worker.py` | `ManagerFactory` session partitioning, `UnaryManager` threadpool execution, and result aggregation. |
 | [`test_schema_manager.py`](composite/test_schema_manager.py) | `core/schema_manager.py`, `core/schema_db.py`, `core/schema_context.py` | Singleton `SchemaManager` lifecycle coordinating DB metadata, dependency resolution, and context compilation. |
-| [`test_cli_schema.py`](composite/test_cli_schema.py) | `ui/cmd.py`, `config/schema.py` | CLI argument parsing into `SchemaConfig`, YAML schema mappings, and multi-target schema overrides. |
+| [`test_cli_schema.py`](composite/test_cli_schema.py) | `cli/cmd.py`, `config/schema.py` | CLI argument parsing into `SchemaConfig`, YAML schema mappings, and multi-target schema overrides. |
 | [`test_gnmi_set.py`](composite/test_gnmi_set.py) | `managers/unary_worker.py`, `specs/gnmi_validator.py`, `config/operations.py` | `SetWorker` validation and execution with update/replace/delete change models. |
+| [`test_gnmi_subscribe.py`](composite/test_gnmi_subscribe.py) | `application/subscriptions.py`, `specs/gnmi_client.py` | Mocked and live gNMI subscription concurrency, state transitions, and multi-target streaming. |
 | [`test_gnmi_schema_integration.py`](composite/test_gnmi_schema_integration.py) | `specs/gnmi_client.py`, `core/schema_manager.py` | End-to-end gNMI payload validation and RFC 7951 JSON serialization. |
 | [`test_netconf_edit_config.py`](composite/test_netconf_edit_config.py) | `specs/netconf_client.py`, `managers/unary_worker.py` | NETCONF candidate `<edit-config>` payload generation, default-operation handling, and RPC error parsing. |
 | [`test_netconf_transactions.py`](composite/test_netconf_transactions.py) | `specs/netconf_client.py`, `managers/unary_worker.py` | Datastore locking, candidate validation, confirmed commit, persist-id tokens, and automatic `<discard-changes>` rollback. |
 | [`test_netconf_schema_integration.py`](composite/test_netconf_schema_integration.py) | `specs/netconf_client.py`, `core/schema_manager.py` | End-to-end NETCONF schema-aware validation and namespaced XML serialization. |
 | [`test_netconf_subscribe.py`](composite/test_netconf_subscribe.py) | `managers/subscribe_session.py`, `specs/netconf_client.py` | RFC 5277 streaming event notification subscription lifecycle, time bounds, and XML event parsing. |
-| [`test_core_yang_srlinux.py`](composite/test_core_yang_srlinux.py) | `core/`, `tests/yang/srlinux/` | Multi-model Nokia SR Linux YANG tree compilation and dependency resolution. |
-| [`test_core_yang_ocnos.py`](composite/test_core_yang_ocnos.py) | `core/`, `tests/yang/ocnos_derived/` | Multi-model IP Infusion OcNOS YANG tree compilation and dependency resolution. |
+| [`test_core_yang_srlinux.py`](composite/test_core_yang_srlinux.py) | `core/`, `testing_env.json` | Multi-model Nokia SR Linux YANG tree compilation and dependency resolution. |
+| [`test_core_yang_ocnos.py`](composite/test_core_yang_ocnos.py) | `core/`, `testing_env.json` | Multi-model IP Infusion OcNOS YANG tree compilation and dependency resolution. |
 
 ---
 
 ## 3. Execution Commands
 
-### Run Full Test Suite
+`pytest.ini` defines markers `unit`, `composite`, and `live`. Use `python -m pytest` (or activate the virtual environment).
+
+### Run Offline Test Suite (Recommended)
 ```bash
-pytest tests/
+pytest -m "not live" tests/
 ```
 
-### Run Unit Tests Only (Fast Feedback ~3s)
+### Run Unit Tests Only (Fast Feedback ~5s)
 ```bash
 pytest tests/unit/
 ```
 
-### Run Composite Tests Only (~15s)
+### Run Offline Composite Tests Only
 ```bash
-pytest tests/composite/
+pytest -m "not live" tests/composite/
 ```
 
 ### Run a Single Test File
@@ -123,8 +143,8 @@ pytest -k "transactions"
 
 ## 4. Test Fixtures & Models
 
-* **Configuration & Payload Fixtures (`tests/fixtures/`)**:
+* **Testbed Configuration (`tests/testing_env.json`):**
+  Defines lab target endpoints (`srlinux`, `ceos`, `ocnos`, `netopeer2`), credentials, and vendor YANG directory paths consumed by `tests/yang_fetcher.py` and testbed integration tests.
+* **Configuration & Payload Fixtures (`tests/fixtures/`):**
   Contains sample YAML configurations and XML payloads used across composite and unit tests (e.g. `tests/fixtures/netconf_transaction_pipeline_test.yaml`, `tests/fixtures/gnmi_multi_operation_pipeline_test.yaml`).
-* **YANG Repository Fixtures (`tests/yang/`)**:
-  Vendor-specific YANG model directories (`srlinux`, `ocnos_derived`) used for integration testing the schema compilation engine.
 

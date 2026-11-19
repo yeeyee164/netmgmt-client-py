@@ -240,7 +240,7 @@ from core import SchemaManager
 from config.operations import SetOperation, Change, ChangeType
 
 mgr = SchemaManager()
-srl_dir = Path("tests/yang/srlinux")
+srl_dir = Path("/path/to/yang/srlinux")  # e.g., resolved via tests/testing_env.json
 
 # 1. Create an isolated context for Nokia SRLinux and load models + dependencies
 sctx = mgr.get_or_create_context(profile="srlinux", search_dirs=[srl_dir])
@@ -280,12 +280,13 @@ sctx = registry.get_or_create_context(profile_id="ocnos_derived")
 
 def fetch_via_netconf(mod_name: str, rev: str | None) -> str | None:
     # Invoked automatically by SchemaResolver when module is missing from local dirs and SchemaDB
-    return netconf_client.fetch_schema_text(mod_name, rev)
+    reply = netconf_client.get_schema(mod_name, rev)
+    return netconf_client._extract_schema_content(reply)
 
 resolver.ensure_module(
     context=sctx,
     module_name="ipi-interface",
-    search_dirs=[Path("tests/yang/ocnos_derived")],
+    search_dirs=[Path("/path/to/yang/ocnos_derived")],
     fetch_callback=fetch_via_netconf,
 )
 ```

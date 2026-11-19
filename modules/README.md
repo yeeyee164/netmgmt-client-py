@@ -12,11 +12,11 @@ These components are protocol-agnostic, allowing managers, workers, and clients 
 
 | File | Primary Exports | Responsibility |
 | :--- | :--- | :--- |
-| [`modules/output.py`](output.py) | `OutputHandler` | Centralized telemetry sink router directing structured output to STDOUT, STDERR, local files, or Syslog servers. |
+| [`modules/output.py`](output.py) | `OutputHandler` | Centralized output router directing formatted responses to `stdout`, `stderr`, or local files (append). Note: `OutputType.SYSLOG` falls back to `stdout`; RFC 5424 Syslog logging is handled by `modules/logger.py`. |
 | [`modules/formatter.py`](formatter.py) | `ProtocolFormatter`, `GNMIFormatter`, `NETCONFFormatter` | Transforms raw protocol responses (Protobuf messages, raw XML strings, `lxml` trees) into JSON, XML, or readable text. |
 | [`modules/logger.py`](logger.py) | `setup_logger` | Configures application logging levels, file logging, and RFC 5424 UDP/TCP syslog forwarding. |
 | [`modules/security.py`](security.py) | `SecurityProfile`, `SecurityModule` | Encapsulates TLS certificate paths and SSH key configurations, generating SSL contexts and SSH kwargs. |
-| [`modules/path.py`](path.py) | `parse_path`, `parse_xpath_keys`, `to_path_elem` | Parses XPath string syntax with key-value predicates into Protobuf `gnmi_pb2.Path` structures. |
+| [`modules/path.py`](path.py) | `parse_path`, `parse_xpath_keys`, `to_path_elem`, `create_prefix`, `to_path_elems`, `gnmi_path_to_xpath` | Parses XPath string syntax with key-value predicates into Protobuf `gnmi_pb2.Path` structures and converts back. |
 | [`modules/validate.py`](validate.py) | `GNMIValidator` | Offline validator verifying gNMI path structures against gNMI specifications. |
 
 ---
@@ -39,7 +39,7 @@ flowchart TD
     end
 
     subgraph Sinks["Destination Sinks"]
-        S_STACK["sysout/stderr/file/syslog"]
+        S_STACK["stdout / stderr / file"]
     end
 
     W --> OH
@@ -55,7 +55,7 @@ flowchart TD
 
 ### 4.1 `OutputHandler` ([`modules/output.py`](output.py))
 Routes structured telemetry messages to destination streams:
-* **Instantiation:** Initialized once per output defined in [`ParsedConfig`](../ui/cmd.py).
+* **Instantiation:** Initialized once per output defined in [`ParsedConfig`](../cli/models.py).
 * **`write(message: dict)`:** Accepts standardized worker dictionaries (`{'target': ..., 'protocol': ..., 'rpc': ..., 'data': ...}`). Automatically invokes the matching protocol formatter and writes to the configured stream.
 * **`close()`:** Safely flushes and closes active file handles on shutdown.
 

@@ -19,6 +19,7 @@ The package is anchored around the [`BaseClient`](base_client.py) abstract base 
 | [`specs/base_validator.py`](base_validator.py) | `BaseValidator` | Base validator contract for offline path and syntax validation. |
 | [`specs/gnmi_validator.py`](gnmi_validator.py) | `GNMIValidator` | Validates gNMI path formatting according to gNMI specifications. |
 | [`specs/netconf_validator.py`](netconf_validator.py) | `NetconfValidator` | Validates NETCONF XPath expressions and Subtree XML filter syntax. |
+| [`specs/client.py`](client.py) | `BaseClient`, `GNMIClient`, `NetconfClient`, `StreamEvent`, `StreamContext` | Compatibility re-export barrel for protocol clients and validators. |
 | [`specs/gnmi/`](gnmi/) | `gnmi_pb2.py`, `gnmi_pb2_grpc.py`, `gnmi_ext_pb2.py` | Precompiled Protocol Buffer stubs for gNMI. |
 
 ---
@@ -43,7 +44,6 @@ classDiagram
     class GNMIClient {
         +grpc.Channel channel
         +gNMIStub stub
-        +discover_schema_profile() SchemaProfile
         +execute_capabilities(operation)
         +execute_get(operation)
         +execute_set(operation)
@@ -126,7 +126,7 @@ from config.selectors import PathSelector
 with GNMIClient(target="172.20.20.2:57401", username="admin", password="password123", insecure=True) as client:
     # Query capabilities
     caps = client.capability()
-    print("gNMI Version:", caps.get("gnmi_version"))
+    print("gNMI Version:", caps.gnmi_version)
 
     # Execute Get
     result = client.execute_get(

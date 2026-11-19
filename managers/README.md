@@ -3,13 +3,15 @@
 ## 1. Overview
 
 > [!NOTE]
-> `manager.py` has been deprecated. For CLI/YAML users, please use classes defined at `ui/runner.py` instead.
+> `managers/manager.py` (`ManagerFactory`, `UnaryManager`, `SubscriptionManager`) is deprecated. Active orchestration lives in [`application/`](../application/__init__.py) (`DeviceOperationService`, `SubscriptionService`) and [`cli/runner.py`](../cli/runner.py) (`CLIApplicationRunner`, `CLIStreamRunner`).
 
-The [`managers/`](__init__.py) package provides the concurrency, worker lifecycle, and orchestration engine for **`netmgnt-client-py`**. It acts as the bridge between declarative [`SessionConfig`](../config/model.py) instances and protocol-specific clients in [`specs/`](../specs/).
+The [`managers/`](__init__.py) package provides the concurrency, worker lifecycle, and client factory layer for **`netmgmt-client-py`**. It bridges declarative [`SessionConfig`](../config/model.py) instances and protocol-specific clients in [`specs/`](../specs/).
 
-The layer cleanly separates execution into two concurrency models:
-1. **Unary Orchestration ([`UnaryManager`](manager.py)):** Runs bounded, one-shot RPCs (`capability`, `get`, `set`, `get-schema`, `transaction`) using a managed `concurrent.futures.ThreadPoolExecutor`.
-2. **Streaming Telemetry ([`SubscriptionManager`](manager.py)):** Manages continuous, long-lived subscriptions (`STREAM`, `ONCE`, `POLL`, RFC 5277 notifications) using dedicated worker threads and a centralized thread-safe `queue.Queue`.
+The layer separates execution into two worker models:
+1. **Unary Workers ([`unary_worker.py`](unary_worker.py)):** Run bounded, one-shot or sequential RPCs (`capability`, `get`, `set`, `get-schema`, `transaction`).
+2. **Streaming Telemetry ([`subscribe_session.py`](subscribe_session.py)):** Runs continuous, long-lived subscriptions (`STREAM`, `ONCE`, `POLL`, RFC 5277 notifications) and emits [`StreamEvent`](../specs/stream_types.py) items into a target queue.
+
+The legacy facades in [`manager.py`](manager.py) (`UnaryManager.run_all()`, `SubscriptionManager.run_all()`) now delegate to `DeviceOperationService.execute_batch()` and `CLIStreamRunner` (falling back to a local `ThreadPoolExecutor` only when a custom `worker_class` is injected).
 
 ---
 
@@ -24,56 +26,10 @@ The layer cleanly separates execution into two concurrency models:
 
 ---
 
-## 3. Architecture & Concurrency Flow
 
-```mermaid
-flowchart TD
-    subgraph Input["Input Configuration"]
-        PC["ParsedConfig (sessions)"]
-    end
+## 3. Key Component Reference
 
-    subgraph Factory["Dispatch & Partitioning"]
-        MF["ManagerFactory.create_managers()"]
-    end
-
-    subgraph Managers["Execution Managers"]
-        UM["UnaryManager (ThreadPoolExecutor)"]
-        SM["SubscriptionManager (Threads + queue.Queue)"]
-    end
-
-    subgraph Workers["Worker Instances"]
-        UWK["Get/Set/Cap/Seq/Tran"]
-        SS["SubscribeSession"]
-    end
-
-    subgraph Clients["Protocol Clients (ClientFactory)"]
-        GC["GNMIClient"]
-        NC["NetconfClient"]
-    end
-
-    subgraph Output["Output Dispatch"]
-        OH["OutputHandler (stdout / file / syslog)"]
-    end
-
-    PC --> MF
-    MF -->|Unary Operations| UM
-    MF -->|Subscribe Operations| SM
-
-    UM --> UWK
-    SM --> SS
-
-    UWK -->|"ClientFactory.get_client()" | GC & NC
-    SS -->|"ClientFactory.get_client()"| GC & NC
-
-    UWK -->|Result Dict| OH
-    SS -->|StreamEvent via Queue| OH
-```
-
----
-
-## 4. Key Component Reference
-
-### 4.1 `ManagerFactory` ([`managers/manager.py`](manager.py))
+### 3.1 `ManagerFactory` ([`managers/manager.py`](manager.py))
 Static orchestration coordinator serving as the main execution entry point:
 * **`create_managers(cfg: ParsedConfig) -> Tuple[List[BaseRPCManager], List[OutputHandler]]`**:
   Inspects all `sessions` inside `ParsedConfig` and partitions them:
@@ -83,7 +39,7 @@ Static orchestration coordinator serving as the main execution entry point:
 * **`execute(cfg: ParsedConfig)`**:
   Orchestrates execution across all created managers within a `finally:` block that guarantees output sinks and file descriptors are cleanly closed.
 
-### 4.2 `UnaryManager` ([`managers/manager.py`](manager.py))
+### 3.2 `UnaryManager` ([`managers/manager.py`](manager.py))
 Executes non-streaming operations concurrently:
 * Uses `concurrent.futures.ThreadPoolExecutor(max_workers=...)` where workers execute independently.
 * Automatically resolves the appropriate worker subclass based on operation type:
@@ -93,7 +49,7 @@ Executes non-streaming operations concurrently:
   * Single `TransactionOperation` -> [`TransactionWorker`](unary_worker.py)
   * Multiple operations in a session (`operations > 1`) -> [`SequentialWorker`](unary_worker.py)
 
-### 4.3 `SubscriptionManager` ([`managers/manager.py`](manager.py))
+### 3.3 `SubscriptionManager` ([`managers/manager.py`](manager.py))
 Supervises continuous, real-time telemetry streaming:
 * Spins up dedicated background threads (`threading.Thread`) per [`SubscribeSession`](subscribe_session.py).
 * Multiplexes incoming [`StreamEvent`](../specs/stream_types.py) data into a shared `queue.Queue`.
@@ -101,34 +57,34 @@ Supervises continuous, real-time telemetry streaming:
 * Automatically launches an interactive CLI controller (`_interactive_poll_controller`) when any session uses `POLL` mode.
 * Traps `KeyboardInterrupt` (Ctrl+C) to trigger graceful shutdowns across all gRPC and SSH sessions.
 
-### 4.4 Worker Classes ([`managers/unary_worker.py`](unary_worker.py))
+### 3.4 Worker Classes ([`managers/unary_worker.py`](unary_worker.py))
 Workers isolate operational execution from transport protocols:
 * **`SequentialWorker`**: Executes an ordered pipeline of operations within a single client connection context manager (`with client:`), ensuring transaction continuity (e.g. `lock` -> `edit-config` -> `validate` -> `commit` -> `unlock`).
-* **`SetWorker`**: Performs offline syntax path validation against [`GNMIValidator`](../modules/validate.py) before dispatching mutations over the wire.
+* **`SetWorker`**: Performs offline syntax path validation via [`ValidatorFactory.get_validator(self.protocol)`](factory.py) before dispatching mutations over the wire.
 * **`GetWorker` / `CapabilityWorker` / `TransactionWorker`**: Formats standardized response dictionaries containing `session_id`, `target`, `rpc`, `data`, and `protocol`.
 
-### 4.5 `ClientFactory` ([`managers/factory.py`](factory.py))
+### 3.5 `ClientFactory` ([`managers/factory.py`](factory.py))
 Instantiates concrete protocol client implementations:
 * `get_client(protocol, target, username, password, security, **kwargs)`: Returns either a [`GNMIClient`](../specs/gnmi_client.py) or [`NetconfClient`](../specs/netconf_client.py) configured with connection parameters and schema configurations.
 
 ---
 
-## 5. Usage Examples
+## 4. Usage Examples
 
-### 5.1 Executing Sessions via `ManagerFactory`
+### 4.1 Executing Sessions via `CLIApplicationRunner` (Recommended) and `ManagerFactory` (Deprecated)
 ```python
-from ui.cmd import build_args, config_builder
-from managers.manager import ManagerFactory
+from cli.cmd import build_args, config_builder
+from cli.runner import CLIApplicationRunner
 
 # Parse CLI arguments into ParsedConfig
-args = build_args(["gnmi", "capability", "--target", "172.20.20.2:57401", "-i"])
+args = build_args(["-t", "172.20.20.2:57401", "-i", "gnmi", "capability"])
 cfg = config_builder(args)
 
-# Execute via ManagerFactory with automated lifecycle management
-ManagerFactory.execute(cfg)
+# Execute via CLIApplicationRunner -> DeviceOperationService
+CLIApplicationRunner.execute(cfg)
 ```
 
-### 5.2 Direct Unary Worker Invocation
+### 4.2 Direct Unary Worker Invocation
 ```python
 from config.model import SessionConfig, ConnectionConfig, Protocol
 from config.operations import GetOperation
