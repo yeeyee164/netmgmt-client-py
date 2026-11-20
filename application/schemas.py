@@ -34,7 +34,7 @@ class SchemaCatalogService:
             schema_db: Optional custom SchemaDB instance (default: newly instantiated).
         """
         self._schema_manager = schema_manager or SchemaManager()
-        self._schema_db = schema_db or SchemaDB()
+        self._schema_db = schema_db or self._schema_manager.db
 
     def validate_request_schema(self, request: ExecutionRequestDTO) -> List[str]:
         """

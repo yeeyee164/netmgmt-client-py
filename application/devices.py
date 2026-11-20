@@ -4,11 +4,89 @@ Device Registry Service.
 Manages network device endpoint profiles and resolves target credentials and protocols.
 """
 
+import json
+from pathlib import Path
 import threading
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from application.dto import AdhocEndpointDTO, ExecutionRequestDTO, SupportedProtocol
 from application.exceptions import DeviceNotFoundError, InvalidRequestError
+
+
+def load_endpoints_from_env_file(
+    file_path: Union[str, Path],
+    *,
+    default_gnmi_insecure: bool = True,
+) -> Dict[str, AdhocEndpointDTO]:
+    """
+    Parses a testbed/inventory JSON file (matching `tests/testing_env.json` format)
+    into a mapping of logical `device_id` strings to validated `AdhocEndpointDTO` instances.
+
+    Devices with a single protocol register under `<device>`; devices with multiple
+    protocols register under `<device>_<protocol>` (e.g. `srlinux_gnmi`, `srlinux_netconf`).
+    """
+    path = Path(file_path).expanduser()
+    if not path.is_file():
+        raise InvalidRequestError(f"Device seed file not found: '{path}'")
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InvalidRequestError(f"Failed to parse device seed file '{path}': {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise InvalidRequestError(f"Device seed file '{path}' must contain a JSON object.")
+
+    endpoints: Dict[str, AdhocEndpointDTO] = {}
+    supported = {p.value for p in SupportedProtocol}
+
+    for dev_name, profile in raw.items():
+        if not isinstance(profile, dict):
+            continue
+        creds = profile.get("credentials") or {}
+        sec = profile.get("security") or {}
+        protocols = profile.get("protocols") or {}
+        if not isinstance(protocols, dict):
+            continue
+
+        valid_protos = [
+            (str(proto).strip().lower(), str(target).strip())
+            for proto, target in protocols.items()
+            if str(proto).strip().lower() in supported and isinstance(target, str) and target.strip()
+        ]
+        if not valid_protos:
+            continue
+
+        username = creds.get("username") if creds.get("username") is not None else creds.get("user")
+        password = creds.get("password")
+
+        for proto, target in valid_protos:
+            device_id = dev_name if len(valid_protos) == 1 else f"{dev_name}_{proto}"
+            explicit_insecure = sec.get("insecure", profile.get("insecure"))
+            has_tls_files = any(sec.get(k) for k in ("tls_ca", "tls_cert", "tls_key"))
+            insecure = (
+                bool(explicit_insecure)
+                if explicit_insecure is not None
+                else (default_gnmi_insecure and proto == SupportedProtocol.GNMI.value and not has_tls_files)
+            )
+            endpoints[device_id] = AdhocEndpointDTO(
+                target=target,
+                protocol=proto,
+                username=username,
+                password=password,
+                tls_ca=sec.get("tls_ca"),
+                tls_cert=sec.get("tls_cert"),
+                tls_key=sec.get("tls_key"),
+                skip_verify=bool(sec.get("skip_verify", False)),
+                insecure=insecure,
+                tls_server_name=sec.get("tls_server_name"),
+                tls_version=sec.get("tls_version"),
+                ssh_key=sec.get("ssh_key"),
+                gnmi_use_tunnel=bool(sec.get("gnmi_use_tunnel", False)),
+                gnmi_target_name=sec.get("gnmi_target_name"),
+            )
+
+    return endpoints
 
 
 class DeviceRegistryService:
@@ -167,4 +245,24 @@ class DeviceRegistryService:
             )
 
         raise InvalidRequestError("Cannot resolve endpoint: neither 'device_id' nor 'adhoc_endpoint' was provided.")
+
+    def seed_from_env_file(
+        self,
+        file_path: Union[str, Path],
+        *,
+        default_gnmi_insecure: bool = True,
+    ) -> List[str]:
+        """
+        Loads device profiles from a `testing_env.json`-formatted file and registers
+        them into this `DeviceRegistryService`. Returns the list of registered device IDs.
+        """
+        endpoints = load_endpoints_from_env_file(
+            file_path, default_gnmi_insecure=default_gnmi_insecure
+        )
+        registered: List[str] = []
+        with self._lock:
+            for dev_id, ep in endpoints.items():
+                self.register_device(dev_id, ep)
+                registered.append(dev_id)
+        return sorted(registered)
 

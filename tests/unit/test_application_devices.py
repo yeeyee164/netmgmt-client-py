@@ -92,3 +92,37 @@ class TestDeviceRegistryService:
         with pytest.raises(DeviceNotFoundError):
             registry.resolve_endpoint(req)
 
+    def test_seed_from_testing_env_json(self):
+        from pathlib import Path
+
+        env_path = Path(__file__).resolve().parents[1] / "testing_env.json"
+        registry = DeviceRegistryService()
+        registered = registry.seed_from_env_file(env_path)
+
+        assert "srlinux_gnmi" in registered
+        assert "srlinux_netconf" in registered
+        assert "ceos" in registered
+        assert "netopeer2" in registered
+
+        srl_gnmi = registry.get_device("srlinux_gnmi")
+        assert srl_gnmi.target == "172.20.20.2:57401"
+        assert srl_gnmi.protocol == "gnmi"
+        assert srl_gnmi.insecure is True
+
+        ceos = registry.get_device("ceos")
+        assert ceos.target == "172.20.20.3:6030"
+        assert ceos.protocol == "gnmi"
+        assert ceos.username == "admin"
+
+        netopeer2 = registry.get_device("netopeer2")
+        assert netopeer2.target == "172.20.20.4:830"
+        assert netopeer2.protocol == "netconf"
+        assert netopeer2.username == "root"
+        assert netopeer2.password == "root"
+        assert netopeer2.insecure is False
+
+    def test_seed_from_missing_file_raises(self, tmp_path):
+        registry = DeviceRegistryService()
+        with pytest.raises(InvalidRequestError, match="not found"):
+            registry.seed_from_env_file(tmp_path / "does_not_exist.json")
+

@@ -62,3 +62,25 @@ class SubscriptionNotFoundError(ApplicationError):
     """
     default_error_code: str = "SUBSCRIPTION_NOT_FOUND"
 
+
+class SessionNotFoundError(ApplicationError):
+    """
+    Raised when a managed logical session identifier is not found, has expired, or is closed.
+    """
+    default_error_code: str = "SESSION_NOT_FOUND"
+
+
+class SessionConflictError(ApplicationError):
+    """
+    Raised when an operation conflicts with the current state or active lease of a managed session.
+    """
+    default_error_code: str = "SESSION_CONFLICT"
+
+
+class PermissionDeniedError(ApplicationError):
+    """
+    Raised when an authenticated caller attempts to access or mutate a resource owned by another principal.
+    """
+    default_error_code: str = "PERMISSION_DENIED"
+
+

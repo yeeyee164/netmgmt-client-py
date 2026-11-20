@@ -19,13 +19,31 @@ from config.operations import (
 
 logger = logging.getLogger(__name__)
 
+
+class _BorrowedClientContext:
+    """
+    Context manager wrapper that yields an already-entered BaseClient
+    without closing it when the worker exits its `with` block.
+    """
+
+    def __init__(self, client: Any):
+        self._client = client
+
+    def __enter__(self):
+        return self._client
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
 class BaseUnaryWorker:
     """
     Base class for single request-response workers
     """
     def __init__(self, target_ip=None, target_port=None, username="",
                  password="", protocol="",
-                 security=None, config=None, **kwargs):
+                 security=None, config=None, client=None, **kwargs):
+        self._external_client = client
         self.config = config
         self.session = config
         self.target_ip = target_ip
@@ -106,7 +124,9 @@ class BaseUnaryWorker:
         return self._format_single_result(rpc_name, data, op=self.operation)
 
     def _get_client(self):
-        """Asks the factory for a client based on the requested protocol"""
+        """Asks the factory for a client based on the requested protocol, or yields a borrowed client."""
+        if self._external_client is not None:
+            return _BorrowedClientContext(self._external_client)
         client_kwargs = dict(self.kwargs) if hasattr(self, 'kwargs') and self.kwargs else {}
         for k in ['target', 'security', 'username', 'password', 'protocol']:
             client_kwargs.pop(k, None)
