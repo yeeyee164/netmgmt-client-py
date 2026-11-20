@@ -62,7 +62,7 @@ from config import (
     GNMIOptions,
     NetconfOptions,
 )
-from managers.manager import BaseRPCManager, UnaryManager, SubscriptionManager, ManagerFactory
+from application.operations import DeviceOperationService
 from managers.unary_worker import BaseUnaryWorker, GetWorker, SetWorker, CapabilityWorker, SequentialWorker, UnaryWorker
 from managers.subscribe_session import SubscribeSession
 from specs.stream_types import StreamEvent, StreamCommandType, StreamContext
@@ -165,76 +165,30 @@ if pytest:
         return build_parsed_config(sample_sessions)
 
 
-class TestManagerSessionScoping(unittest.TestCase):
+class TestWorkerSessionScoping(unittest.TestCase):
     def setUp(self):
         self.sample_sessions = build_sample_sessions()
         self.parsed_config = build_parsed_config(self.sample_sessions)
 
-    def test_manager_factory_partitioning(self):
-        managers, handlers = ManagerFactory.create_managers(self.parsed_config)
+    def test_operation_service_worker_resolution(self):
+        svc = DeviceOperationService()
+        w_get = svc._resolve_worker(self.sample_sessions['get_1'])
+        w_set = svc._resolve_worker(self.sample_sessions['set'])
+        w_cap = svc._resolve_worker(self.sample_sessions['cap'])
 
-        self.assertEqual(len(managers), 2)
-        self.assertIsInstance(managers[0], UnaryManager)
-        self.assertIsInstance(managers[1], SubscriptionManager)
+        self.assertIsInstance(w_get, GetWorker)
+        self.assertEqual(w_get.config, self.sample_sessions['get_1'])
+        self.assertEqual(w_get.target_ip, '10.0.0.1')
+        self.assertEqual(w_get.target_port, 9339)
 
-        unary_mgr = managers[0]
-        self.assertEqual(len(unary_mgr.session_configs), 4)
+        self.assertIsInstance(w_set, SetWorker)
+        self.assertEqual(w_set.config, self.sample_sessions['set'])
+        self.assertEqual(w_set.target_ip, '10.0.0.3')
+        self.assertEqual(w_set.updates, [('/system/config/hostname', 'router3')])
 
-        sub_mgr = managers[1]
-        self.assertEqual(len(sub_mgr.session_configs), 2)
-
-    def test_unary_manager_build_sessions_dispatch(self):
-        unary_sessions = [self.sample_sessions['get_1'], self.sample_sessions['set'], self.sample_sessions['cap']]
-        mock_handler = MagicMock()
-        mgr = UnaryManager(sessions=unary_sessions, output_handlers=[mock_handler])
-
-        mgr.build_sessions()
-
-        self.assertEqual(len(mgr.sessions), 3)
-        self.assertIsInstance(mgr.sessions[0], GetWorker)
-        self.assertEqual(mgr.sessions[0].config, self.sample_sessions['get_1'])
-        self.assertEqual(mgr.sessions[0].target_ip, '10.0.0.1')
-        self.assertEqual(mgr.sessions[0].target_port, 9339)
-
-        self.assertIsInstance(mgr.sessions[1], SetWorker)
-        self.assertEqual(mgr.sessions[1].config, self.sample_sessions['set'])
-        self.assertEqual(mgr.sessions[1].target_ip, '10.0.0.3')
-        self.assertEqual(mgr.sessions[1].updates, [('/system/config/hostname', 'router3')])
-
-        self.assertIsInstance(mgr.sessions[2], CapabilityWorker)
-        self.assertEqual(mgr.sessions[2].config, self.sample_sessions['cap'])
-        self.assertEqual(mgr.sessions[2].target_ip, '10.0.0.4')
-
-    def test_subscription_manager_build_sessions(self):
-        sub_sessions = [self.sample_sessions['sub_1'], self.sample_sessions['sub_2']]
-        mock_handler = MagicMock()
-        mgr = SubscriptionManager(sessions=sub_sessions, output_handlers=[mock_handler])
-
-        mgr.build_sessions()
-
-        self.assertEqual(len(mgr.sessions), 2)
-        for s in mgr.sessions:
-            self.assertIsInstance(s, SubscribeSession)
-
-        self.assertEqual(mgr.sessions[0].config, self.sample_sessions['sub_1'])
-        self.assertEqual(mgr.sessions[0].target_ip, '10.0.0.5')
-        self.assertEqual(mgr.sessions[0].subscription_name, 'sub_telemetry')
-
-        self.assertEqual(mgr.sessions[1].config, self.sample_sessions['sub_2'])
-        self.assertEqual(mgr.sessions[1].target_ip, '10.0.0.6')
-        self.assertEqual(mgr.sessions[1].subscription_name, 'sub_poll')
-
-    def test_output_handlers_centralized_lifecycle(self):
-        mock_mgr_unary = MagicMock(spec=UnaryManager)
-        mock_mgr_sub = MagicMock(spec=SubscriptionManager)
-        mock_handler = MagicMock()
-
-        with patch.object(ManagerFactory, 'create_managers', return_value=([mock_mgr_unary, mock_mgr_sub], [mock_handler])):
-            ManagerFactory.execute(self.parsed_config)
-
-            mock_mgr_unary.run_all.assert_called_once()
-            mock_mgr_sub.run_all.assert_called_once()
-            mock_handler.close.assert_called_once()
+        self.assertIsInstance(w_cap, CapabilityWorker)
+        self.assertEqual(w_cap.config, self.sample_sessions['cap'])
+        self.assertEqual(w_cap.target_ip, '10.0.0.4')
 
 
 class TestPerRPCSessionConfigHierarchy(unittest.TestCase):
@@ -359,32 +313,17 @@ class TestSemanticManagerSessionScoping(unittest.TestCase):
             targets=['10.0.0.1:9339', '10.0.0.2:9339', '10.0.0.3:9339', '10.0.0.4:9339', '10.0.0.5:9339', '10.0.0.6:9339']
         )
 
-    def test_semantic_manager_factory_partitioning(self):
-        managers, handlers = ManagerFactory.create_managers(self.parsed_config)
-        self.assertEqual(len(managers), 2)
-        self.assertIsInstance(managers[0], UnaryManager)
-        self.assertIsInstance(managers[1], SubscriptionManager)
-        self.assertEqual(len(managers[0].session_configs), 4)
-        self.assertEqual(len(managers[1].session_configs), 2)
+    def test_semantic_worker_dispatch(self):
+        svc = DeviceOperationService()
+        self.assertIsInstance(svc._resolve_worker(self.get_1), GetWorker)
+        self.assertIsInstance(svc._resolve_worker(self.set_1), SetWorker)
+        self.assertIsInstance(svc._resolve_worker(self.cap_1), CapabilityWorker)
 
-    def test_semantic_unary_manager_dispatch(self):
-        unary_sessions = [self.get_1, self.set_1, self.cap_1]
-        mgr = UnaryManager(sessions=unary_sessions, output_handlers=[MagicMock()])
-        mgr.build_sessions()
-        self.assertEqual(len(mgr.sessions), 3)
-        self.assertIsInstance(mgr.sessions[0], GetWorker)
-        self.assertIsInstance(mgr.sessions[1], SetWorker)
-        self.assertIsInstance(mgr.sessions[2], CapabilityWorker)
-
-    def test_semantic_subscription_manager_dispatch(self):
-        sub_sessions = [self.sub_1, self.sub_2]
-        mgr = SubscriptionManager(sessions=sub_sessions, output_handlers=[MagicMock()])
-        mgr.build_sessions()
-        self.assertEqual(len(mgr.sessions), 2)
-        self.assertIsInstance(mgr.sessions[0], SubscribeSession)
-        self.assertIsInstance(mgr.sessions[1], SubscribeSession)
-        self.assertFalse(mgr.sessions[0].is_poll_mode())
-        self.assertTrue(mgr.sessions[1].is_poll_mode())
+    def test_semantic_subscribe_session_poll_detection(self):
+        sub_1_sess = SubscribeSession(config=self.sub_1)
+        sub_2_sess = SubscribeSession(config=self.sub_2)
+        self.assertFalse(sub_1_sess.is_poll_mode())
+        self.assertTrue(sub_2_sess.is_poll_mode())
 
     def test_subscribe_session_streaming_execution(self):
         import queue
@@ -439,7 +378,7 @@ class TestSemanticManagerSessionScoping(unittest.TestCase):
         session.stop()
         self.assertTrue(session.stream_context.is_cancelled)
 
-    def test_unary_manager_sequential_worker_resolution(self):
+    def test_sequential_worker_resolution(self):
         conn = ConnectionConfig(target='172.20.20.2:830')
         multi_op_session = SessionConfig(
             connection=conn,
@@ -449,10 +388,8 @@ class TestSemanticManagerSessionScoping(unittest.TestCase):
                 GetConfigOperation(protocol_options=NetconfOptions(source="running")),
             ]
         )
-        mgr = UnaryManager(sessions=[multi_op_session], output_handlers=[MagicMock()])
-        mgr.build_sessions()
-        self.assertEqual(len(mgr.sessions), 1)
-        self.assertIsInstance(mgr.sessions[0], SequentialWorker)
+        worker = DeviceOperationService()._resolve_worker(multi_op_session)
+        self.assertIsInstance(worker, SequentialWorker)
 
     def test_sequential_worker_single_session_lifecycle(self):
         conn = ConnectionConfig(target='172.20.20.2:830')

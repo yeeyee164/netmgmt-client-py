@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Any, Union, List
-from modules.security import SecurityProfile
 from config.operations import OperationConfig
 from config.protocol_options.base import BaseProtocolOptions
 from config.protocol_options.gnmi import GnmiOptions
@@ -32,6 +31,22 @@ class OutputFormat(str, Enum):
     JSON = "json"
     XML = "xml"
     TEXT = "text"
+
+
+@dataclass
+class SecurityProfile:
+    """
+    A configuration dataclass holding all security-related parameters for a session.
+    """
+    tls_ca: str = ""
+    tls_cert: str = ""
+    tls_key: str = ""
+    skip_verify: bool = False
+    tls_server_name: str = ""
+    tls_version: str = ""
+
+    ssh_key: str = ""
+
 
 @dataclass(frozen=True, kw_only=True)
 class ConnectionConfig:

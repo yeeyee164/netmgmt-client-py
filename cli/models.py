@@ -4,9 +4,12 @@ Execution configuration domain models and base classes for the UI layer.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import logging
 from typing import Any, List, Optional
 
 from config.model import OutputConfig, SessionConfig
+
+logger = logging.getLogger(__name__)
 
 
 class FileConfigError(Exception):
@@ -40,15 +43,15 @@ class ParsedConfig:
                 try:
                     from cli.adapters import session_to_execution_request
                     self.requests.append(session_to_execution_request(s))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Skipping session->request adaptation in ParsedConfig: %s", exc)
         elif self.requests and not self.sessions:
             for r in self.requests:
                 try:
                     from cli.adapters import execution_request_to_session
                     self.sessions.append(execution_request_to_session(r, registry=self.device_registry))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Skipping request->session adaptation in ParsedConfig: %s", exc)
 
     def __str__(self):
         session_strs = "\n".join([str(s) for s in self.sessions])

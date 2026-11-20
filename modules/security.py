@@ -4,24 +4,11 @@ try:
 except ImportError:
     grpc = None
 
-from dataclasses import dataclass
 import logging
+from config.model import SecurityProfile
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class SecurityProfile:
-    """
-    A configuration dataclass holding all security-related parameters for a session.
-    """
-    tls_ca: str = ""
-    tls_cert: str = ""
-    tls_key: str = ""
-    skip_verify: bool = False
-    tls_server_name: str = ""
-    tls_version: str = ""
-
-    ssh_key: str = ""
 
 class SecurityModule:
     """

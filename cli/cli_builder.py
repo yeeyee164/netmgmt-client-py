@@ -12,6 +12,7 @@ from config.model import (
     OutputFormat,
     OutputType,
     Protocol,
+    SecurityProfile,
     SessionConfig,
 )
 from config.operations import (
@@ -29,7 +30,6 @@ from config.operations import (
 from config.protocol_options import GNMIOptions, NetconfOptions
 from config.schema import SchemaConfig
 from config.selectors import FilterSelector, PathSelector
-from modules.security import SecurityProfile
 from cli.cli_args import _parse_cli_mutation_flags
 from cli.models import ConfigBuilder, ParsedConfig
 from cli.normalizers import resolve_delivery_mode
@@ -327,12 +327,14 @@ class CLIConfigBuilder(ConfigBuilder):
         raise ValueError(f"Unknown NETCONF operation: {operation}")
 
     def _build_outputs(self) -> List[OutputConfig]:
-        output_type = self.args.output_type or OutputType.STDOUT
-        output_format = self.args.output_format or OutputFormat.JSON
+        raw_type = self.args.output_type or OutputType.STDOUT
+        raw_format = self.args.output_format or OutputFormat.JSON
+        output_type = OutputType(raw_type) if isinstance(raw_type, str) else raw_type
+        output_format = OutputFormat(raw_format) if isinstance(raw_format, str) else raw_format
         output_path = None
 
         if output_type == OutputType.FILE:
-            output_path = self.args.output_path
+            output_path = getattr(self.args, "output_file", None)
 
         return [OutputConfig(
             output_type=output_type,

@@ -35,7 +35,7 @@ class OutputHandler:
             self.stream = sys.stderr
         elif self.file_type == OutputType.FILE:
             self.stream = open(str(config.path), 'a')
-            print(f"[Output] Created file sink: {self.file_type}")
+            print(f"[Output] Created file sink: {config.path}")
         else:
             # default case is STDOUT
             self.stream = sys.stdout

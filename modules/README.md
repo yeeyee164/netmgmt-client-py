@@ -13,11 +13,10 @@ These components are protocol-agnostic, allowing managers, workers, and clients 
 | File | Primary Exports | Responsibility |
 | :--- | :--- | :--- |
 | [`modules/output.py`](output.py) | `OutputHandler` | Centralized output router directing formatted responses to `stdout`, `stderr`, or local files (append). Note: `OutputType.SYSLOG` falls back to `stdout`; RFC 5424 Syslog logging is handled by `modules/logger.py`. |
-| [`modules/formatter.py`](formatter.py) | `ProtocolFormatter`, `GNMIFormatter`, `NETCONFFormatter` | Transforms raw protocol responses (Protobuf messages, raw XML strings, `lxml` trees) into JSON, XML, or readable text. |
+| [`modules/formatter.py`](formatter.py) | `ProtocolFormatter`, `GNMIFormatter`, `NETCONFFormatter`, `normalize_protocol_payload` | Transforms raw protocol responses (Protobuf messages, raw XML strings, `lxml` trees) into JSON, XML, text, or JSON-serializable primitives. |
 | [`modules/logger.py`](logger.py) | `setup_logger` | Configures application logging levels, file logging, and RFC 5424 UDP/TCP syslog forwarding. |
-| [`modules/security.py`](security.py) | `SecurityProfile`, `SecurityModule` | Encapsulates TLS certificate paths and SSH key configurations, generating SSL contexts and SSH kwargs. |
+| [`modules/security.py`](security.py) | `SecurityModule`, `SecurityProfile` (re-exported from `config.model`) | Generates gRPC SSL credentials and SSH kwargs from TLS certificate paths and SSH key configurations. |
 | [`modules/path.py`](path.py) | `parse_path`, `parse_xpath_keys`, `to_path_elem`, `create_prefix`, `to_path_elems`, `gnmi_path_to_xpath` | Parses XPath string syntax with key-value predicates into Protobuf `gnmi_pb2.Path` structures and converts back. |
-| [`modules/validate.py`](validate.py) | `GNMIValidator` | Offline validator verifying gNMI path structures against gNMI specifications. |
 
 ---
 

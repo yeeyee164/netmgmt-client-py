@@ -33,8 +33,6 @@ from core.schema_errors import SchemaError, SchemaValidationError, InvalidSchema
 
 RPCError = getattr(operations, 'RPCError', Exception) if operations else Exception
 
-RPCError = getattr(operations, 'RPCError', Exception) if operations else Exception
-
 NETCONF_BASE_NS = "urn:ietf:params:xml:ns:netconf:base:1.0"
 NETCONF_NS = {
     'nc': NETCONF_BASE_NS
@@ -232,24 +230,7 @@ class NetconfClient(BaseClient):
             paths = list(operation.selector.paths)
 
         if self.schema_config and self.schema_config.validate and paths:
-            if self.schema_profile is None:
-                if self.schema_config.auto_discovery and self.session:
-                    try:
-                        self.discover_schema_profile()
-                    except Exception:
-                        pass
-                if self.schema_profile is None:
-                    pid = (
-                        getattr(self.schema_config, 'device_profile', None)
-                        or getattr(self.schema_config, 'profile', None)
-                    )
-                    self.schema_profile = SchemaProfile(content_id=pid)
-            sm = SchemaManager(global_cache_dir=self.schema_config.cache_dir)
-            sm.get_or_create_context(
-                profile=self.schema_profile,
-                search_dirs=self.schema_config.yang_dirs,
-                strict=True,
-            )
+            sm, _ = self._prepare_schema_context(allow_auto_discovery=True)
             for p in paths:
                 sm.validate_path(path=p, profile_id=self.schema_profile.profile_id, operation=operation)
 
@@ -313,25 +294,7 @@ class NetconfClient(BaseClient):
                 removes.append(val)
 
         if self.schema_config and self.schema_config.validate:
-            if self.schema_profile is None:
-                if self.schema_config.auto_discovery and self.session:
-                    try:
-                        self.discover_schema_profile()
-                    except Exception:
-                        pass
-                if self.schema_profile is None:
-                    pid = (
-                        getattr(self.schema_config, 'device_profile', None)
-                        or getattr(self.schema_config, 'profile', None)
-                    )
-                    self.schema_profile = SchemaProfile(content_id=pid)
-
-            sm = SchemaManager(global_cache_dir=self.schema_config.cache_dir)
-            sctx = sm.get_or_create_context(
-                profile=self.schema_profile,
-                search_dirs=self.schema_config.yang_dirs,
-                strict=True,
-            )
+            sm, sctx = self._prepare_schema_context(allow_auto_discovery=True)
 
             fetch_cb = (
                 (lambda name, rev: self._extract_schema_content(self.get_schema(name, rev)))
@@ -449,21 +412,6 @@ class NetconfClient(BaseClient):
             raise UnsupportedOperationError(
                 f"[NetconfClient] Unknown transaction operation: {op_type}"
             )
-
-    def execute_subscribe(
-        self,
-        selectors: Any = None,
-        options: Optional[BaseProtocolOptions] = None,
-        context: Optional[StreamContext] = None,
-        operation: Optional[SubscribeOperation] = None,
-        **kwargs,
-    ) -> Iterator[StreamEvent]:
-        """Executes NETCONF Event Notifications (RFC 5277 / RFC 8639) based on SubscribeOperation.
-        Planned for a future milestone.
-        """
-        raise UnsupportedOperationError(
-            f"{self.__class__.__name__} does not support subscribe operations."
-        )
 
     # =========================================================================
     # Legacy Methods & Internal Helpers

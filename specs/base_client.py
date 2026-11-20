@@ -104,3 +104,41 @@ class BaseClient(ABC):
             raise UnsupportedOperationError(
                 f"{self.__class__.__name__} does not support operation {type(operation).__name__}."
             )
+
+    def _prepare_schema_context(self, allow_auto_discovery: bool = False) -> tuple[Any, Any]:
+        """
+        Ensures `self.schema_profile` is initialized (optionally running `discover_schema_profile()`
+        when `allow_auto_discovery=True`) and compiles/retrieves the isolated `SchemaContext`
+        from `SchemaManager`.
+
+        Returns:
+            Tuple of `(SchemaManager, SchemaContext)`.
+        """
+        from config.schema import SchemaProfile
+        from core.schema_manager import SchemaManager
+
+        if getattr(self, "schema_profile", None) is None:
+            if (
+                allow_auto_discovery
+                and getattr(self.schema_config, "auto_discovery", False)
+                and getattr(self, "session", None)
+                and hasattr(self, "discover_schema_profile")
+            ):
+                try:
+                    self.discover_schema_profile()
+                except Exception:
+                    pass
+            if getattr(self, "schema_profile", None) is None:
+                pid = (
+                    getattr(self.schema_config, "device_profile", None)
+                    or getattr(self.schema_config, "profile", None)
+                )
+                self.schema_profile = SchemaProfile(content_id=pid)
+
+        sm = SchemaManager(global_cache_dir=self.schema_config.cache_dir)
+        sctx = sm.get_or_create_context(
+            profile=self.schema_profile,
+            search_dirs=self.schema_config.yang_dirs,
+            strict=True,
+        )
+        return sm, sctx

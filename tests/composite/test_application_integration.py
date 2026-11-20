@@ -9,7 +9,6 @@ from cli.cmd import (
     execution_request_to_session,
 )
 from cli.runner import CLIApplicationRunner, CLIStreamRunner
-from managers.manager import ManagerFactory, UnaryManager, SubscriptionManager
 from application.operations import DeviceOperationService
 from application.devices import DeviceRegistryService
 from application.dto import (
@@ -160,10 +159,9 @@ targets:
         assert parsed.sessions[0].username == "admin"
 
     @patch("cli.runner.OutputHandler")
-    @patch("managers.manager.OutputHandler")
     @patch.object(DeviceOperationService, "_resolve_worker")
-    def test_cli_application_runner_and_manager_factory_delegation(
-        self, mock_resolve, mock_mgr_oh, mock_runner_oh
+    def test_cli_application_runner_delegation(
+        self, mock_resolve, mock_runner_oh
     ):
         mock_worker = MagicMock()
         mock_worker.start.return_value = {
@@ -177,7 +175,6 @@ targets:
 
         mock_handler_instance = MagicMock()
         mock_runner_oh.return_value = mock_handler_instance
-        mock_mgr_oh.return_value = mock_handler_instance
 
         builder = FileConfigBuilder(
             "tests/fixtures/gnmi_get_test.yaml",
@@ -192,12 +189,7 @@ targets:
         assert results[0].target == "172.20.20.2:57401"
         mock_handler_instance.write.assert_called_once()
         mock_handler_instance.close.assert_called_once()
-
-        # Execute via legacy ManagerFactory.execute (delegates to DeviceOperationService.execute_batch)
-        ManagerFactory.execute(cfg)
-        assert mock_worker.start.call_count == 2
-        assert mock_handler_instance.write.call_count == 2
-        assert mock_handler_instance.close.call_count == 2
+        assert mock_worker.start.call_count == 1
 
     @patch("application.subscriptions.SubscribeSession")
     def test_cli_stream_runner_and_subscription_manager_delegation(self, mock_sub_cls):

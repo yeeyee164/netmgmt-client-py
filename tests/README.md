@@ -10,7 +10,7 @@ tests/
 ├── testing_env.json          # Lab device endpoints, credentials, and vendor YANG paths
 ├── yang_fetcher.py           # Test utility for dynamic RFC 6022 model gathering
 ├── fixtures/                 # Centralized test payloads and configurations (.yaml, .xml)
-├── unit/                     # Isolated, fast-executing unit test suite (21 files)
+├── unit/                     # Isolated, fast-executing unit test suite (22 files)
 │   ├── test_api_concurrency.py
 │   ├── test_api_routes.py
 │   ├── test_application_devices.py
@@ -18,6 +18,7 @@ tests/
 │   ├── test_application_operations.py
 │   ├── test_application_sessions.py
 │   ├── test_application_subscriptions.py
+│   ├── test_cli_builder.py
 │   ├── test_config_models.py
 │   ├── test_delivery_mode.py
 │   ├── test_path.py
@@ -67,6 +68,7 @@ tests/
 | [`test_application_operations.py`](unit/test_application_operations.py) | `application/operations.py` | `DeviceOperationService` unary, batch, validate-only, and session-bound execution. |
 | [`test_application_sessions.py`](unit/test_application_sessions.py) | `application/sessions.py` | `DeviceSessionManager` leasing, lock/commit state tracking, and TTL expiration. |
 | [`test_application_subscriptions.py`](unit/test_application_subscriptions.py) | `application/subscriptions.py` | `SubscriptionService` lifecycle, bounded `FanoutQueue` behavior, and consumer cursors. |
+| [`test_cli_builder.py`](unit/test_cli_builder.py) | `cli/cli_builder.py` | CLI output flag mapping (`--output-type`, `--output-file`, `--output-format`). |
 | [`test_path.py`](unit/test_path.py) | `modules/path.py` | XPath string parsing, keys extraction, gNMI `Path` and `PathElem` generation. |
 | [`test_config_models.py`](unit/test_config_models.py) | `config/model.py`, `config/operations.py` | Immutability, validation logic, and property accessors for `ConnectionConfig`, `SessionConfig`, and `OperationConfig`. |
 | [`test_delivery_mode.py`](unit/test_delivery_mode.py) | `config/delivery.py` | RFC 8641 protocol-neutral delivery mode resolution, case-insensitivity, and validation. |
@@ -93,7 +95,7 @@ tests/
 | :--- | :--- | :--- |
 | [`test_api_testbed.py`](composite/test_api_testbed.py) | `api/`, `application/`, live testbed | Live FastAPI integration against SRLinux, cEOS, and Netopeer2 (via `testing_env.json`). |
 | [`test_application_integration.py`](composite/test_application_integration.py) | `cli/`, `application/`, `managers/` | End-to-end YAML/CLI adapter, `CLIApplicationRunner`, `DeviceOperationService`, and legacy manager compatibility. |
-| [`test_managers.py`](composite/test_managers.py) | `managers/manager.py`, `managers/unary_worker.py` | `ManagerFactory` session partitioning, `UnaryManager` threadpool execution, and result aggregation. |
+| [`test_managers.py`](composite/test_managers.py) | `application/operations.py`, `managers/unary_worker.py`, `managers/subscribe_session.py` | Worker resolution (`DeviceOperationService`), `SequentialWorker`, `SubscribeSession`, and `OutputHandler` formatting. |
 | [`test_schema_manager.py`](composite/test_schema_manager.py) | `core/schema_manager.py`, `core/schema_db.py`, `core/schema_context.py` | Singleton `SchemaManager` lifecycle coordinating DB metadata, dependency resolution, and context compilation. |
 | [`test_cli_schema.py`](composite/test_cli_schema.py) | `cli/cmd.py`, `config/schema.py` | CLI argument parsing into `SchemaConfig`, YAML schema mappings, and multi-target schema overrides. |
 | [`test_gnmi_set.py`](composite/test_gnmi_set.py) | `managers/unary_worker.py`, `specs/gnmi_validator.py`, `config/operations.py` | `SetWorker` validation and execution with update/replace/delete change models. |

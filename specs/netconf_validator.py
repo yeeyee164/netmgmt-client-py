@@ -9,7 +9,7 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from typing import Optional, Union, Any
 
-from modules.validate import BaseValidator, PathValidationError
+from specs.base_validator import BaseValidator, PathValidationError
 from core.schema_context import SchemaContext
 from core.schema_manager import SchemaManager
 from core.schema_validator import SchemaValidator

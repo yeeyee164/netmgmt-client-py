@@ -16,10 +16,9 @@ The package is anchored around the [`BaseClient`](base_client.py) abstract base 
 | [`specs/gnmi_client.py`](gnmi_client.py) | `GNMIClient` | High-performance gNMI client implementation using `grpcio` and Protobuf stubs. |
 | [`specs/netconf_client.py`](netconf_client.py) | `NetconfClient` | Full-featured NETCONF client built on `ncclient` supporting candidate transactions, locking, and RFC 5277. |
 | [`specs/stream_types.py`](stream_types.py) | `StreamContext`, `StreamEvent`, `StreamCommand`, `StreamCommandType` | Normalized telemetry streaming data structures and flow control queues. |
-| [`specs/base_validator.py`](base_validator.py) | `BaseValidator` | Base validator contract for offline path and syntax validation. |
-| [`specs/gnmi_validator.py`](gnmi_validator.py) | `GNMIValidator` | Validates gNMI path formatting according to gNMI specifications. |
-| [`specs/netconf_validator.py`](netconf_validator.py) | `NetconfValidator` | Validates NETCONF XPath expressions and Subtree XML filter syntax. |
-| [`specs/client.py`](client.py) | `BaseClient`, `GNMIClient`, `NetconfClient`, `StreamEvent`, `StreamContext` | Compatibility re-export barrel for protocol clients and validators. |
+| [`specs/base_validator.py`](base_validator.py) | `BaseValidator`, `PathValidationError` | Base validator contract and exception for offline path and syntax validation. |
+| [`specs/gnmi_validator.py`](gnmi_validator.py) | `GNMIValidator` | Validates gNMI path formatting and compiled YANG schema paths. |
+| [`specs/netconf_validator.py`](netconf_validator.py) | `NetconfValidator` | Validates NETCONF XPath expressions, Subtree XML filter syntax, and RFC 5277 subscription options. |
 | [`specs/gnmi/`](gnmi/) | `gnmi_pb2.py`, `gnmi_pb2_grpc.py`, `gnmi_ext_pb2.py` | Precompiled Protocol Buffer stubs for gNMI. |
 
 ---

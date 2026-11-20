@@ -29,9 +29,9 @@ from application.exceptions import (
     SessionConflictError,
     SessionNotFoundError,
 )
+from config.model import SecurityProfile
 from config.operations import NetconfTransactionOperation, TransactionType
 from managers.factory import ClientFactory
-from modules.security import SecurityProfile
 
 logger = logging.getLogger(__name__)
 

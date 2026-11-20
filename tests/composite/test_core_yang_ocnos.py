@@ -21,6 +21,8 @@ from core.schema_resolver import SchemaResolver
 from config.schema import SchemaProfile, ModuleRef
 from tests.yang_fetcher import yang_test_suite_builder
 
+pytestmark = pytest.mark.live
+
 SUITE = yang_test_suite_builder("ocnos")
 if SUITE is None:
     pytest.skip("Device 'ocnos' not configured in testing_env.json", allow_module_level=True)

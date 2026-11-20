@@ -53,6 +53,11 @@ Extract a component when it has multiple callers, independently
 meaningful rules, or tests that are difficult to write because too many
 concerns are coupled together.
 
+> **Status note:** `OperationRequestMapper` and `ExecutionResultMapper`
+> have been extracted into `application/operation_mapper.py`, leaving
+> `DeviceOperationService` focused on endpoint resolution, worker
+> coordination, validate-only flow, and session/batch execution.
+
 ------------------------------------------------------------------------
 
 ## AC-002: CLI-oriented output handling leaks into the application layer

@@ -8,9 +8,9 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from specs.gnmi import gnmi_pb2
-from specs.client import GNMIClient
+from specs.gnmi_client import GNMIClient
 from managers.unary_worker import SetWorker
-from modules.validate import GNMIValidator, PathValidationError
+from specs.gnmi_validator import GNMIValidator, PathValidationError
 from modules.formatter import GNMIFormatter
 from cli.cmd import build_args, CLIConfigBuilder, SessionConfig
 

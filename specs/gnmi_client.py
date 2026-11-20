@@ -154,18 +154,7 @@ class GNMIClient(BaseClient):
             prefix = operation.selector.prefix
 
         if self.schema_config and self.schema_config.validate and paths:
-            if self.schema_profile is None:
-                pid = (
-                    getattr(self.schema_config, 'device_profile', None)
-                    or getattr(self.schema_config, 'profile', None)
-                )
-                self.schema_profile = SchemaProfile(content_id=pid)
-            sm = SchemaManager(global_cache_dir=self.schema_config.cache_dir)
-            sm.get_or_create_context(
-                profile=self.schema_profile,
-                search_dirs=self.schema_config.yang_dirs,
-                strict=True,
-            )
+            sm, _ = self._prepare_schema_context(allow_auto_discovery=False)
             for p in paths:
                 sm.validate_path(path=p, profile_id=self.schema_profile.profile_id, operation=operation)
 
@@ -184,18 +173,7 @@ class GNMIClient(BaseClient):
                 enc = operation.protocol_options.encoding
 
         if self.schema_config and self.schema_config.validate:
-            if self.schema_profile is None:
-                pid = (
-                    getattr(self.schema_config, 'device_profile', None)
-                    or getattr(self.schema_config, 'profile', None)
-                )
-                self.schema_profile = SchemaProfile(content_id=pid)
-            sm = SchemaManager(global_cache_dir=self.schema_config.cache_dir)
-            sm.get_or_create_context(
-                profile=self.schema_profile,
-                search_dirs=self.schema_config.yang_dirs,
-                strict=True,
-            )
+            sm, _ = self._prepare_schema_context(allow_auto_discovery=False)
 
             validated_changes = []
             for change in operation.changes:

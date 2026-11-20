@@ -26,6 +26,7 @@ from config.model import (
     OutputFormat,
     OutputType,
     Protocol,
+    SecurityProfile,
     SessionConfig,
 )
 from config.operations import (
@@ -52,7 +53,6 @@ from config.selectors import (
     PathSelector,
     Selector,
 )
-from modules.security import SecurityProfile
 from util.utils import read_payload
 
 # Submodule exports
