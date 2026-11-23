@@ -29,7 +29,9 @@ from application.dto import (
     expand_request_repetitions,
 )
 from application.devices import DeviceRegistryService, load_endpoints_from_env_file
+from application.operation_mapper import OperationRequestMapper, ExecutionResultMapper
 from application.operations import DeviceOperationService, normalize_protocol_payload
+from application.subscription_queue import FanoutQueue, ManagedSubscription
 from application.subscriptions import SubscriptionService, SubscriptionState
 from application.schemas import SchemaCatalogService
 from application.sessions import (
@@ -65,9 +67,13 @@ __all__ = [
     "DeviceRegistryService",
     "load_endpoints_from_env_file",
     "DeviceOperationService",
+    "OperationRequestMapper",
+    "ExecutionResultMapper",
     "normalize_protocol_payload",
     "SubscriptionService",
     "SubscriptionState",
+    "FanoutQueue",
+    "ManagedSubscription",
     "SchemaCatalogService",
     "DeviceSessionManager",
     "LogicalSessionState",

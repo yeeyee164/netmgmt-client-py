@@ -1,67 +1,54 @@
 # -*- coding: utf-8 -*-
 """
 Device Operation Service.
-Coordinates unary operations, builds internal SessionConfig domain models,
-and executes requests returning structured ExecutionResultDTO instances.
+Coordinates unary operations, builds internal SessionConfig domain models via
+`OperationRequestMapper`, and executes requests returning structured `ExecutionResultDTO`
+instances via `ExecutionResultMapper`.
 """
 
 import concurrent.futures
 import dataclasses
 import logging
-from pathlib import Path
 import time
 from typing import Any, List, Optional, Sequence
 
+from application.devices import DeviceRegistryService
 from application.dto import (
     ExecutionRequestDTO,
     ExecutionResultDTO,
     OperationStepDTO,
     StepResultDTO,
-    SupportedProtocol,
-    VALID_GNMI_ENCODINGS,
     expand_request_repetitions,
-    validate_protocol_operation,
 )
-from application.devices import DeviceRegistryService
-from application.schemas import SchemaCatalogService
-from application.sessions import DeviceSessionManager, build_security_profile
 from application.exceptions import (
     ApplicationError,
     InvalidRequestError,
     PermissionDeniedError,
     SessionConflictError,
     SessionNotFoundError,
-    UnsupportedProtocolError,
-    DeviceNotFoundError,
 )
+from application.operation_mapper import ExecutionResultMapper, OperationRequestMapper
+from application.schemas import SchemaCatalogService
+from application.sessions import DeviceSessionManager
 
-from config.model import SessionConfig, ConnectionConfig, ExecutionConfig, Protocol
-from config.schema import SchemaConfig
+from config.model import Protocol, SessionConfig
 from config.operations import (
-    OperationConfig,
     CapabilitiesOperation,
     GetOperation,
-    GetConfigOperation,
     GetSchemaOperation,
+    OperationConfig,
     SetOperation,
-    EditConfigOperation,
     TransactionOperation,
-    TransactionType,
-    SubscribeOperation,
-    Change,
-    ChangeType,
 )
-from config.selectors import PathSelector, FilterSelector
-from config.protocol_options import GnmiOptions, NetconfOptions
-from config.delivery import DeliveryMode, DeliveryPolicy
 from managers.unary_worker import (
     BaseUnaryWorker,
-    SequentialWorker,
-    GetWorker,
-    SetWorker,
     CapabilityWorker,
+    GetWorker,
+    SequentialWorker,
+    SetWorker,
     TransactionWorker,
 )
+from modules.formatter import normalize_protocol_payload
 
 logger = logging.getLogger(__name__)
 
@@ -174,319 +161,17 @@ class DeviceOperationService:
     def build_session_config(self, request: ExecutionRequestDTO) -> SessionConfig:
         """
         Translates an external `ExecutionRequestDTO` into an internal engine `SessionConfig`.
-
-        Resolves connection endpoints, configures security profiles, sets execution
-        parameters, establishes schema validation configurations, and maps operation steps
-        to concrete `OperationConfig` models according to the target protocol.
-
-        Args:
-            request: `ExecutionRequestDTO` describing target and desired operations.
-
-        Returns:
-            `SessionConfig` instance ready for worker instantiation and execution.
-
-        Raises:
-            InvalidRequestError: If the request is missing operations or contains protocol-incompatible steps.
-            DeviceNotFoundError: If request specifies an unregistered device_id.
         """
         endpoint = self._registry.resolve_endpoint(request)
-        proto_enum = Protocol.GNMI if endpoint.protocol == "gnmi" else Protocol.NETCONF
-
-        # Security Profile
-        security = build_security_profile(endpoint)
-
-        connection = ConnectionConfig(
-            target=endpoint.target,
-            username=endpoint.username or "",
-            password=endpoint.password or "",
-            security=security,
-            insecure=bool(endpoint.insecure or endpoint.skip_verify),
-        )
-
-        execution = ExecutionConfig(
-            timeout=request.timeout_seconds,
-            retry_count=1,
-            times=1,  # Repetition multiplier is handled authoritatively by Application Service Layer
-            continue_on_error=getattr(request, "continue_on_error", False),
-        )
-
-        # Schema Config
-        schema = SchemaConfig(
-            yang_dirs=tuple(Path(p) for p in request.schema_dirs),
-            cache_dir=Path(request.schema_cache_dir) if request.schema_cache_dir else None,
-            profile=request.schema_profile_id,
-            validate=bool(request.schema_validate or request.schema_profile_id or request.schema_dirs),
-            auto_discovery=request.schema_auto_discovery,
-            auto_fetch=request.schema_auto_fetch,
-        )
-
-        # Map operations
-        operations: List[OperationConfig] = []
-        for step in request.operations:
-            op = self._map_operation_step(step, proto_enum)
-            operations.append(op)
-
-        if not operations:
-            raise InvalidRequestError("ExecutionRequestDTO must contain at least one operation in 'operations'.")
-
-        session_cfg = SessionConfig(
-            connection=connection,
-            protocol=proto_enum,
-            operations=tuple(operations),
-            execution=execution,
-            schema=schema,
-        )
-        return session_cfg
+        return OperationRequestMapper.build_session_config(request, endpoint)
 
     def _map_operation_step(self, step: OperationStepDTO, proto: Protocol) -> OperationConfig:
-        """
-        Converts an `OperationStepDTO` to an internal `OperationConfig` subclass.
-
-        Performs protocol-matrix validation and enforces protocol-specific constraints
-        (e.g. gNMI does not support NETCONF candidate datastore locks/commits or XML subtree filters).
-
-        Args:
-            step: `OperationStepDTO` describing the operation step.
-            proto: Protocol enum (`Protocol.GNMI` or `Protocol.NETCONF`).
-
-        Returns:
-            `OperationConfig` subclass instance matching the step and protocol.
-
-        Raises:
-            InvalidRequestError: If the step is invalid, unsupported for the protocol,
-                or missing mandatory parameters.
-        """
-        op_type = validate_protocol_operation(proto.value, step.op_type)
-
-        if proto == Protocol.GNMI and step.filter_expression and step.filter_type == "subtree":
-            raise InvalidRequestError(
-                "gNMI does not support XML subtree filter expressions.",
-                error_code="UNSUPPORTED_PROTOCOL_FILTER",
-            )
-
-        # 1. Capabilities
-        if op_type in ("capabilities", "capability"):
-            return CapabilitiesOperation(op_id=step.op_id)
-
-        # 2. Get / Get-Config
-        elif op_type in ("get", "get_config"):
-            selector = self._build_selector(step)
-            if proto == Protocol.GNMI:
-                encoding = str(step.options.get("encoding", "json_ietf")).strip().lower()
-                if encoding not in VALID_GNMI_ENCODINGS:
-                    raise InvalidRequestError(
-                        f"Unsupported gNMI encoding '{encoding}'. Valid encodings: {sorted(VALID_GNMI_ENCODINGS)}",
-                        error_code="INVALID_OPTIONS",
-                    )
-                proto_opts = GnmiOptions(
-                    encoding=encoding,
-                )
-            else:
-                proto_opts = NetconfOptions(
-                    source_datastore=step.datastore if step.datastore != "all" else "running",
-                )
-            read_scope = step.options.get(
-                "read_scope",
-                "config" if op_type == "get_config" or step.datastore != "all" else "all",
-            )
-            if op_type == "get_config" and proto == Protocol.NETCONF:
-                return GetConfigOperation(
-                    selector=selector,
-                    read_scope=read_scope,
-                    protocol_options=proto_opts,
-                    op_id=step.op_id,
-                )
-            return GetOperation(
-                selector=selector,
-                read_scope=read_scope,
-                protocol_options=proto_opts,
-                op_id=step.op_id,
-            )
-
-        # 3. Get-Schema (NETCONF only, enforced by PROTOCOL_OPERATION_MATRIX)
-        elif op_type in ("get_schema", "schema"):
-            identifier = step.paths[0] if step.paths else step.options.get("identifier", "")
-            if not identifier or not str(identifier).strip():
-                raise InvalidRequestError(
-                    "get-schema operation requires a non-empty 'identifier'.",
-                    error_code="INVALID_SELECTOR",
-                )
-            return GetSchemaOperation(
-                identifier=str(identifier).strip(),
-                version=step.options.get("version"),
-                format=step.options.get("format", "yang"),
-                op_id=step.op_id,
-            )
-
-        # 4. Set / Edit-Config
-        elif op_type in ("set", "edit_config", "edit"):
-            has_xml = step.xml_payload is not None or step.options.get("config") is not None
-            if not step.changes and not has_xml:
-                raise InvalidRequestError(
-                    "Set / edit-config operation requires at least one mutation change or an XML config payload.",
-                    error_code="INVALID_MUTATION",
-                )
-            if proto == Protocol.GNMI and not step.changes and has_xml:
-                raise InvalidRequestError(
-                    "gNMI 'set' does not support raw NETCONF XML payloads; provide structured 'changes'.",
-                    error_code="UNSUPPORTED_PROTOCOL_PAYLOAD",
-                )
-
-            changes: List[Change] = []
-            for ch in step.changes:
-                ch_op = ChangeType(ch.operation.lower())
-                changes.append(Change(path=ch.path, value=ch.value, operation=ch_op, type=ch.value_type))
-
-            if proto == Protocol.GNMI:
-                encoding = str(step.options.get("encoding", "json_ietf")).strip().lower()
-                if encoding not in VALID_GNMI_ENCODINGS:
-                    raise InvalidRequestError(
-                        f"Unsupported gNMI encoding '{encoding}'. Valid encodings: {sorted(VALID_GNMI_ENCODINGS)}",
-                        error_code="INVALID_OPTIONS",
-                    )
-                proto_opts = GnmiOptions(
-                    encoding=encoding,
-                )
-            else:
-                lock_val = step.options.get("lock_target", step.options.get("lock", False))
-                val_cand = step.options.get("validate_candidate", step.options.get("validate", False))
-                default_commit = True if step.xml_payload is not None else False
-                conf_timeout = step.options.get("confirm_timeout")
-                if conf_timeout is not None:
-                    if not isinstance(conf_timeout, int) or isinstance(conf_timeout, bool) or conf_timeout <= 0:
-                        raise InvalidRequestError(
-                            "Netconf 'confirm_timeout' must be a positive integer.",
-                            error_code="INVALID_OPTIONS",
-                        )
-                proto_opts = NetconfOptions(
-                    target_datastore=step.datastore if step.datastore != "all" else step.options.get("target_datastore", "candidate"),
-                    config=step.xml_payload if step.xml_payload is not None else step.options.get("config"),
-                    default_operation=step.options.get("default_operation", "merge"),
-                    test_option=step.options.get("test_option"),
-                    error_option=step.options.get("error_option", "stop-on-error"),
-                    lock_target=bool(lock_val),
-                    validate_candidate=bool(val_cand),
-                    commit=bool(step.options.get("commit", default_commit)),
-                    confirmed=bool(step.options.get("confirmed", False)),
-                    confirm_timeout=conf_timeout,
-                    persist=str(step.options.get("persist", "") or ""),
-                    persist_id=str(step.options.get("persist_id", "") or ""),
-                )
-            if op_type in ("edit_config", "edit") and proto == Protocol.NETCONF:
-                return EditConfigOperation(
-                    changes=tuple(changes),
-                    prefix=step.prefix or "",
-                    protocol_options=proto_opts,
-                    op_id=step.op_id,
-                )
-            return SetOperation(
-                changes=tuple(changes),
-                prefix=step.prefix or "",
-                protocol_options=proto_opts,
-                op_id=step.op_id,
-            )
-
-        # 5. Candidate Transactions (NETCONF only, enforced by PROTOCOL_OPERATION_MATRIX)
-        elif op_type in ("lock", "unlock", "commit", "discard_changes", "cancel_commit", "validate"):
-            tx_map = {
-                "lock": TransactionType.LOCK,
-                "unlock": TransactionType.UNLOCK,
-                "commit": TransactionType.COMMIT,
-                "cancel_commit": TransactionType.CANCEL_COMMIT,
-                "discard_changes": TransactionType.DISCARD_CHANGES,
-                "validate": TransactionType.VALIDATE,
-            }
-            tx_type = tx_map.get(op_type, TransactionType.COMMIT)
-            conf_timeout = step.options.get("confirm_timeout")
-            if conf_timeout is not None:
-                if (not isinstance(conf_timeout, int) and not (isinstance(conf_timeout, str) and conf_timeout.isdigit())) or isinstance(conf_timeout, bool):
-                    raise InvalidRequestError(
-                        "Transaction 'confirm_timeout' must be a positive integer.",
-                        error_code="INVALID_OPTIONS",
-                    )
-                conf_timeout = int(conf_timeout)
-                if conf_timeout <= 0:
-                    raise InvalidRequestError(
-                        "Transaction 'confirm_timeout' must be a positive integer.",
-                        error_code="INVALID_OPTIONS",
-                    )
-            from config.operations import NetconfTransactionOperation
-            return NetconfTransactionOperation(
-                operation=tx_type,
-                target_datastore=step.datastore if step.datastore != "all" else "candidate",
-                source_datastore=step.options.get("source_datastore", "candidate"),
-                confirmed=bool(step.options.get("confirmed", False)),
-                confirm_timeout=conf_timeout,
-                persist=str(step.options.get("persist") or ""),
-                persist_id=str(step.options.get("persist_id") or ""),
-                op_id=step.op_id,
-            )
-
-        # 6. Subscribe
-        elif op_type == "subscribe":
-            selector = self._build_selector(step)
-            delivery = None
-            if step.telemetry:
-                d_mode = DeliveryMode(step.telemetry.mode.value)
-                hb = int(step.telemetry.heartbeat_interval_sec) if step.telemetry.heartbeat_interval_sec is not None else 0
-                delivery = DeliveryPolicy(
-                    mode=d_mode,
-                    interval=int(round(step.telemetry.sample_interval_sec)),
-                    heartbeat=hb,
-                    suppress_redundant=step.telemetry.suppress_redundant,
-                )
-            else:
-                delivery = DeliveryPolicy(mode=DeliveryMode.PERIODIC, interval=10)
-
-            sub_name = step.options.get("subscription_name", "sub")
-            if proto == Protocol.GNMI:
-                encoding = str(step.options.get("encoding", "json_ietf")).strip().lower()
-                if encoding not in VALID_GNMI_ENCODINGS:
-                    raise InvalidRequestError(
-                        f"Unsupported gNMI encoding '{encoding}'. Valid encodings: {sorted(VALID_GNMI_ENCODINGS)}",
-                        error_code="INVALID_OPTIONS",
-                    )
-                proto_opts = GnmiOptions(
-                    encoding=encoding,
-                    updates_only=bool(step.options.get("updates_only", False)),
-                )
-            else:
-                proto_opts = NetconfOptions(
-                    stream_name=step.options.get("stream_name", "NETCONF"),
-                    start_time=step.options.get("start_time"),
-                    stop_time=step.options.get("stop_time"),
-                    poll_timeout=step.options.get("poll_timeout", 1.0),
-                )
-            return SubscribeOperation(
-                selector=selector,
-                delivery=delivery,
-                subscription_name=sub_name,
-                protocol_options=proto_opts,
-                op_id=step.op_id,
-            )
-
-        else:
-            raise InvalidRequestError(
-                f"Unsupported operation type: '{step.op_type}'",
-                error_code="INVALID_OPERATION",
-            )
+        """Converts an `OperationStepDTO` to an internal `OperationConfig` subclass."""
+        return OperationRequestMapper.map_operation_step(step, proto)
 
     def _build_selector(self, step: OperationStepDTO) -> Any:
-        """
-        Constructs a `PathSelector` or `FilterSelector` from DTO fields.
-
-        Args:
-            step: `OperationStepDTO` containing paths or filter_expression.
-
-        Returns:
-            `FilterSelector` if filter_expression is present; `PathSelector` otherwise.
-        """
-        if step.filter_expression:
-            return FilterSelector(
-                expression=step.filter_expression,
-                filter_type=step.filter_type or "xpath",
-            )
-        return PathSelector(paths=tuple(step.paths), prefix=step.prefix or "")
+        """Constructs a `PathSelector` or `FilterSelector` from DTO fields."""
+        return OperationRequestMapper.build_selector(step)
 
     @classmethod
     def resolve_worker(cls, session_cfg: Any, client: Optional[Any] = None) -> BaseUnaryWorker:
@@ -495,16 +180,6 @@ class DeviceOperationService:
 
         Selects `SequentialWorker` for multi-operation sessions, or specific workers
         (`GetWorker`, `SetWorker`, `CapabilityWorker`, `TransactionWorker`) for single-operation sessions.
-
-        Args:
-            session_cfg: `SessionConfig` instance with operations.
-            client: Optional pre-connected protocol client borrowed from a logical session lease.
-
-        Returns:
-            `BaseUnaryWorker` subclass instance configured for execution.
-
-        Raises:
-            ValueError: If the operation is not a recognized unary operation.
         """
         operations = getattr(session_cfg, "operations", ())
         if len(operations) > 1:
@@ -524,16 +199,7 @@ class DeviceOperationService:
         raise ValueError(f"Unsupported unary operation: {op}")
 
     def _resolve_worker(self, session_cfg: Any, client: Optional[Any] = None) -> BaseUnaryWorker:
-        """
-        Instance delegation for resolve_worker.
-
-        Args:
-            session_cfg: `SessionConfig` instance.
-            client: Optional pre-connected protocol client borrowed from a logical session lease.
-
-        Returns:
-            `BaseUnaryWorker` subclass instance.
-        """
+        """Instance delegation for resolve_worker."""
         return self.resolve_worker(session_cfg, client=client)
 
     def execute_unary(
@@ -546,12 +212,6 @@ class DeviceOperationService:
         Builds domain configuration, executes workers synchronously or via thread execution,
         and returns a structured `ExecutionResultDTO` without terminal or file presentation side effects.
         If request.times > 1, delegates to execute_batch and aggregates step results.
-
-        Args:
-            request: `ExecutionRequestDTO` describing the operations to execute.
-
-        Returns:
-            Structured `ExecutionResultDTO` containing overall status, timing, and step results.
         """
         # If request requested repetition, delegate to execute_batch and aggregate results
         if getattr(request, "times", 1) > 1:
@@ -624,22 +284,12 @@ class DeviceOperationService:
         start_time: float,
     ) -> ExecutionResultDTO:
         """Builds a structured failed ExecutionResultDTO for top-level service errors."""
-        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-        return ExecutionResultDTO(
+        return ExecutionResultMapper.build_error_result(
             target=target,
             protocol=protocol,
-            success=False,
-            results=[
-                StepResultDTO(
-                    op_type="error",
-                    success=False,
-                    error=message,
-                    error_code=error_code,
-                )
-            ],
-            error_summary=message,
+            message=message,
             error_code=error_code,
-            execution_time_ms=elapsed_ms,
+            start_time=start_time,
         )
 
     def _execute_validate_only(
@@ -782,13 +432,6 @@ class DeviceOperationService:
         Expands requests according to their .times repetition multipliers into single-run DTOs
         (preventing multiplicative execution, conforming to ADR-003) and isolates individual
         request failures so that one failing target does not abort the entire batch.
-
-        Args:
-            requests: Sequence of `ExecutionRequestDTO` instances to execute.
-            max_workers: Optional thread pool size limit (defaults to number of expanded requests).
-
-        Returns:
-            List of `ExecutionResultDTO` instances corresponding to each executed request.
         """
         expanded_requests = expand_request_repetitions(requests)
 
@@ -839,58 +482,10 @@ class DeviceOperationService:
         protocol: str,
         elapsed_ms: float,
     ) -> ExecutionResultDTO:
-        """
-        Standardizes raw worker dictionaries or lists into a structured `ExecutionResultDTO`.
-
-        Extracts operation/RPC names, payloads, and error status from worker results,
-        assigning standardized error codes and computing overall success.
-
-        Args:
-            raw_result: Output from `worker.start()` (dict or list of dicts).
-            target: Target device address string.
-            protocol: Protocol used for the execution.
-            elapsed_ms: Execution duration in milliseconds.
-
-        Returns:
-            Structured `ExecutionResultDTO` instance.
-        """
-        items = raw_result if isinstance(raw_result, list) else [raw_result]
-        step_results: List[StepResultDTO] = []
-        errors: List[str] = []
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            rpc_name = item.get("rpc", "unknown")
-            payload = item.get("data")
-            is_err = isinstance(payload, Exception) or item.get("error") is not None
-            err_msg = str(item.get("error") or payload) if is_err else None
-            data = None if is_err else payload
-
-            if is_err and err_msg:
-                errors.append(err_msg)
-
-            op_id = item.get("op_id")
-            step_results.append(
-                StepResultDTO(
-                    op_type=rpc_name,
-                    op_id=op_id,
-                    success=not is_err,
-                    data=data,
-                    error=err_msg,
-                    error_code="RPC_EXECUTION_ERROR" if is_err else None,
-                )
-            )
-
-        all_success = (len(errors) == 0) and len(step_results) > 0
-        error_summary = "; ".join(errors) if errors else None
-
-        return ExecutionResultDTO(
+        """Standardizes raw worker dictionaries or lists into a structured `ExecutionResultDTO`."""
+        return ExecutionResultMapper.format_execution_result(
+            raw_result=raw_result,
             target=target,
             protocol=protocol,
-            success=all_success,
-            results=step_results,
-            error_summary=error_summary,
-            error_code="RPC_EXECUTION_ERROR" if errors else None,
-            execution_time_ms=elapsed_ms,
+            elapsed_ms=elapsed_ms,
         )

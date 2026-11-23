@@ -155,8 +155,6 @@ class YangSchemaFetcher:
         self.password = password
         self.timeout = timeout
         self.output_dir = Path(output_dir).resolve() if output_dir else None
-        if self.output_dir:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
         self.schema_db = schema_db
         self._session = None
 
@@ -294,6 +292,7 @@ class YangSchemaFetcher:
             target_path = self.output_dir / filename if self.output_dir else None
 
             if target_path:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
                 target_path.write_text(content, encoding="utf-8")
                 local_path = target_path
                 logger.info(f"[YangFetcher] Saved '{module_name}' to {local_path}")

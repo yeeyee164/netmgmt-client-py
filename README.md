@@ -21,8 +21,8 @@ A high-performance, protocol-agnostic Northbound (NB) network management and aut
   * Embedded `libyang` compilation and SQLite metadata caching (`core/schema_cache.db`).
   * Offline path and leaf type validation enforcing `config false` write protection.
   * Automatic translation between semantic models, RFC 7951 JSON, and namespaced XML subtrees.
-* **Pluggable Telemetry Sinks:**
-  * Route responses and real-time streaming telemetry to `stdout`, `stderr`, rotated local files, or RFC 5424 Syslog servers.
+* **Pluggable Output & Logging Sinks:**
+  * Route RPC responses and streaming telemetry to `stdout`, `stderr`, or local files (`OutputHandler`), and write engine logs to files or RFC 5424 Syslog servers (`modules/logger.py`).
 
 ---
 
@@ -38,10 +38,10 @@ A high-performance, protocol-agnostic Northbound (NB) network management and aut
 ```bash
 # 1. Activate your virtual environment.
 # For example:
-source $HOME/pyvenv3.10/bin/activate
+source /home/vbx/pyvenv3.10/bin/activate
 
-# 2. Install required Python packages
-pip install grpcio grpcio-tools ncclient xmltodict pyyaml lxml pytest libyang
+# 2. Install required Python packages (core engine + FastAPI backend)
+pip install -r requirements.txt
 
 # 3. Verify CLI entrypoint
 python client_main.py --help
@@ -219,6 +219,6 @@ For detailed, in-depth walkthroughs of all CLI flags, options, schema validation
 ## Contributor & Architecture Navigation
 
 If you are developing or contributing to **`netmgmt-client-py`**:
-* **Architecture, Module Inventory & Guidelines:** Consult [`AGENTS.md`](AGENTS.md) for a concise component breakdown of each directory (`config/`, `core/`, `managers/`, `specs/`, `modules/`, `ui/`).
+* **Architecture, Module Inventory & Guidelines:** Consult [`AGENTS.md`](AGENTS.md) for a concise component breakdown of each directory (`api/`, `application/`, `cli/`, `config/`, `core/`, `managers/`, `modules/`, `specs/`).
 * **YANG Schema & Caching Engine:** Consult [`core/README.md`](core/README.md) for data models, SQLite cache schemas, and `libyang` integration details.
-* **Running Tests:** Run the full test suite via `pytest tests/`.
+* **Running Tests:** Run the offline test suite via `pytest -m "not live" tests/` (or `pytest tests/unit/`).

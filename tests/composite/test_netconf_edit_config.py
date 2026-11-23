@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from cli.cmd import parse_args
 from config.model import SessionConfig
 from config.operations import SetOperation
-from specs.client import NetconfClient
+from specs.netconf_client import NetconfClient
 from modules.formatter import NETCONFFormatter
 
 

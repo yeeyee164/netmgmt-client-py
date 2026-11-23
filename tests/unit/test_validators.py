@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from managers.factory import ValidatorFactory
 from specs.netconf_validator import NetconfValidator
 from specs.gnmi_validator import GNMIValidator
-from modules.validate import PathValidationError
+from specs.base_validator import PathValidationError
 from core.schema_context import ContextRegistry
 from core.schema_manager import SchemaManager
 from config.operations import SetOperation, GetOperation

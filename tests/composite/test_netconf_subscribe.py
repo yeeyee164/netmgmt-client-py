@@ -16,7 +16,7 @@ from specs.base_client import UnsupportedOperationError
 from specs.stream_types import StreamContext, StreamEvent
 from specs.netconf_client import NetconfClient
 from specs.netconf_validator import NetconfValidator
-from modules.validate import PathValidationError
+from specs.base_validator import PathValidationError
 from cli.cmd import build_args, parse_args
 
 

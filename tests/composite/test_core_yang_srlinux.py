@@ -22,6 +22,8 @@ from core.schema_manager import SchemaManager
 from config.schema import SchemaProfile, ModuleRef
 from tests.yang_fetcher import yang_test_suite_builder
 
+pytestmark = pytest.mark.live
+
 SUITE = yang_test_suite_builder("srlinux")
 if SUITE is None:
     pytest.skip("Device 'srlinux' not configured in testing_env.json", allow_module_level=True)

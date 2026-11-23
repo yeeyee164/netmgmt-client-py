@@ -9,6 +9,8 @@ import sys
 import os
 from pathlib import Path
 
+import pytest
+
 # Ensure repository root is on sys.path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -17,4 +19,16 @@ if str(REPO_ROOT) not in sys.path:
 TESTS_ROOT = REPO_ROOT / "tests"
 FIXTURES_DIR = TESTS_ROOT / "fixtures"
 YANG_DIR = TESTS_ROOT / "yang"
+
+
+def pytest_collection_modifyitems(items):
+    """Ensure tests under unit/ and composite/ inherit their suite marker."""
+    unit_dir = TESTS_ROOT / "unit"
+    composite_dir = TESTS_ROOT / "composite"
+    for item in items:
+        item_path = Path(str(item.fspath)).resolve()
+        if unit_dir in item_path.parents and not item.get_closest_marker("unit"):
+            item.add_marker(pytest.mark.unit)
+        elif composite_dir in item_path.parents and not item.get_closest_marker("composite"):
+            item.add_marker(pytest.mark.composite)
 

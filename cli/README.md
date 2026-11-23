@@ -6,7 +6,7 @@ The [`cli/`](__init__.py) package provides the command-line based interface inge
 1. **Interactive CLI Subparsers:** Nested `argparse` commands for ad-hoc inspection (`client_main.py gnmi ...`, `client_main.py netconf ...`).
 2. **Hierarchical YAML Configurations:** Multi-target, multi-operation, and streaming telemetry orchestration pipelines (`client_main.py -c config.yaml`).
 
-Regardless of the ingestion source (CLI or YAML), the parser compiles and normalizes inputs into a single canonical [`ParsedConfig`](cmd.py) instance consumed directly by [`ManagerFactory`](../managers/manager.py).
+Regardless of the ingestion source (CLI or YAML), the parser compiles and normalizes inputs into a single canonical [`ParsedConfig`](models.py) instance executed by [`CLIApplicationRunner`](runner.py) through the [`application/`](../application/__init__.py) service layer.
 
 ---
 
@@ -19,7 +19,8 @@ Regardless of the ingestion source (CLI or YAML), the parser compiles and normal
 | [`cli/normalizers.py`](normalizers.py) | `resolve_delivery_mode`, `extract_filter_expression`, `_parse_schema_config` | Telemetry delivery mode translation (RFC 8641), XPath/subtree filter extraction, and YANG schema compilation. |
 | [`cli/cli_args.py`](cli_args.py) | `build_args`, `netconf_args`, `gnmi_args`, `add_schema_args`, `PairedAction` | CLI `argparse` hierarchy, interleaved paired option tracking, and subparser definitions. |
 | [`cli/cli_builder.py`](cli_builder.py) | `CLIConfigBuilder` | Translates interactive CLI arguments into `ParsedConfig` sessions and operations. |
-| [`cli/file_builder.py`](file_builder.py) | `FileConfigBuilder`, `parse_operation_item` | Ingests hierarchical YAML pipelines, operation sequences, targets, and device inventories. |
+| [`cli/file_builder.py`](file_builder.py) | `FileConfigBuilder`, `parse_operation_item` (re-exported) | Ingests hierarchical YAML pipelines, targets, and device inventories. |
+| [`cli/operation_parser.py`](operation_parser.py) | `parse_operation_item` | Parses individual YAML `operations:` entries into typed `OperationConfig` instances. |
 | [`cli/adapters.py`](adapters.py) | `session_to_execution_request`, `execution_request_to_session` | Bidirectional adapters between internal `SessionConfig` and Application Service Layer `ExecutionRequestDTO`. |
 | [`cli/runner.py`](runner.py) | `CLIApplicationRunner`, `CLIStreamRunner` | Presentation execution runners coordinating unary batches and streaming telemetry with `OutputHandler`. |
 | [`cli/__init__.py`](__init__.py) | Package exports | Exposes primary public interface helpers. |

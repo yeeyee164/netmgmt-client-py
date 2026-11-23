@@ -2,6 +2,7 @@ from config.model import (
     Protocol,
     OutputType,
     OutputFormat,
+    SecurityProfile,
     ConnectionConfig,
     ExecutionConfig,
     SessionConfig,
@@ -28,6 +29,9 @@ from config.operations import (
     SetOperation,
     EditConfigOperation,
     SubscribeOperation,
+    TransactionType,
+    TransactionOperation,
+    NetconfTransactionOperation,
 )
 from config.protocol_options import (
     BaseProtocolOptions,
@@ -48,6 +52,10 @@ from config.schema import (
 
 __all__ = [
     "Protocol",
+    "OutputType",
+    "OutputFormat",
+    "OutputConfig",
+    "SecurityProfile",
     "ConnectionConfig",
     "ExecutionConfig",
     "SessionConfig",
@@ -67,6 +75,9 @@ __all__ = [
     "SetOperation",
     "EditConfigOperation",
     "SubscribeOperation",
+    "TransactionType",
+    "TransactionOperation",
+    "NetconfTransactionOperation",
     "BaseProtocolOptions",
     "GnmiOptions",
     "GNMIOptions",

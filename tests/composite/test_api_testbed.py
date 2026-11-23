@@ -19,6 +19,8 @@ from fastapi.testclient import TestClient
 import httpx
 import pytest
 
+pytestmark = pytest.mark.live
+
 from api.deps import APISettings
 from api.main import create_app
 

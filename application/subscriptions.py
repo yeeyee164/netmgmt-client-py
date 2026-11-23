@@ -11,8 +11,6 @@ import time
 from typing import Any, Dict, Iterator, List, Optional
 import uuid
 
-from enum import Enum
-
 from application.dto import ExecutionRequestDTO, StreamEventDTO, SupportedProtocol
 from application.devices import DeviceRegistryService
 from application.operations import DeviceOperationService
@@ -21,6 +19,13 @@ from application.exceptions import (
     PermissionDeniedError,
     SubscriptionNotFoundError,
     UnsupportedProtocolError,
+)
+from application.subscription_queue import (
+    _STOP_SENTINEL,
+    _ConsumerQueue,
+    FanoutQueue,
+    ManagedSubscription,
+    SubscriptionState,
 )
 from managers.subscribe_session import SubscribeSession
 
@@ -109,119 +114,6 @@ class FanoutQueue(queue.Queue):
                     queue.Queue.put(cq, _STOP_SENTINEL, block=False)
                 except queue.Full:
                     pass
-
-
-class SubscriptionState(str, Enum):
-    """
-    Lifecycle state of a streaming telemetry subscription
-
-    Attributes:
-        STARTING: Background worker thread spawned; stream context initialization in progress.
-        RUNNING: Connection active and stream events/updates are flowing or ready.
-        STOPPING: Stop or cancellation signal delivered; waiting for thread join.
-        STOPPED: Subscription session and worker thread terminated cleanly.
-        FAILED: Subscription worker terminated prematurely due to an RPC or transport error.
-    """
-    STARTING = "starting"
-    RUNNING = "running"
-    STOPPING = "stopping"
-    STOPPED = "stopped"
-    FAILED = "failed"
-
-
-class ManagedSubscription:
-    """
-    Internal resource container tracking an active streaming telemetry subscription.
-
-    Maintains references to the underlying `SubscribeSession` worker, background execution
-    thread, event queue, timing metrics, and lifecycle state.
-
-    Attributes:
-        subscription_id: Unique 36-character UUID string identifying the subscription.
-        target: Target device address formatted as '<host>:<port>'.
-        protocol: Management protocol used ('gnmi' or 'netconf').
-        subscription_name: Logical subscription name defined by caller.
-        worker: Concrete SubscribeSession worker instance executing the stream.
-        thread: Background execution thread driving worker.start().
-        data_queue: Thread-safe queue buffering incoming telemetry events.
-        created_at: Unix timestamp when the subscription was instantiated.
-        stopped_at: Unix timestamp when the subscription stopped, or None if active.
-        state: Current SubscriptionState enum value.
-        error: Error description string if the subscription entered FAILED state.
-    """
-
-    def __init__(
-        self,
-        subscription_id: str,
-        target: str,
-        protocol: str,
-        subscription_name: str,
-        worker: SubscribeSession,
-        thread: threading.Thread,
-        data_queue: queue.Queue,
-        owner_id: Optional[str] = None,
-    ):
-        """
-        Initializes a `ManagedSubscription` tracking record.
-
-        Args:
-            subscription_id: Unique UUID string.
-            target: Target address '<host>:<port>'.
-            protocol: 'gnmi' or 'netconf'.
-            subscription_name: Caller-defined subscription name.
-            worker: `SubscribeSession` worker instance.
-            thread: Background execution thread.
-            data_queue: Thread-safe Queue receiving `StreamEvent` payloads.
-            owner_id: Optional authenticated owner identifier for multi-caller isolation.
-        """
-        self.subscription_id = subscription_id
-        self.target = target
-        self.protocol = protocol
-        self.subscription_name = subscription_name
-        self.worker = worker
-        self.thread = thread
-        self.data_queue = data_queue
-        self.owner_id = owner_id
-        self.created_at = time.time()
-        self.stopped_at: Optional[float] = None
-        self.state = SubscriptionState.STARTING
-        self.error: Optional[str] = None
-
-    def _sync_state(self) -> None:
-        """
-        Synchronizes lifecycle state with actual worker and thread execution status.
-
-        Updates state to STOPPED or FAILED if the thread or worker has completed.
-        """
-        if self.state in (SubscriptionState.STOPPED, SubscriptionState.FAILED):
-            return
-
-        worker_err = getattr(self.worker, "last_error", None)
-        if isinstance(worker_err, (str, Exception)) and worker_err:
-            self.error = str(worker_err)
-
-        is_mock_worker = hasattr(self.worker, "_mock_return_value") or "Mock" in type(self.worker).__name__
-        thread_alive = bool(self.thread and self.thread.is_alive()) if not is_mock_worker else bool(getattr(self.worker, "is_running", False))
-        worker_running = bool(self.worker and getattr(self.worker, "is_running", False))
-
-        if not thread_alive or not worker_running:
-            self.stopped_at = self.stopped_at or time.time()
-            if self.error:
-                self.state = SubscriptionState.FAILED
-            elif self.state == SubscriptionState.STOPPING:
-                self.state = SubscriptionState.STOPPED
-            else:
-                self.state = SubscriptionState.STOPPED
-        else:
-            self.state = SubscriptionState.RUNNING
-
-    @property
-    def is_alive(self) -> bool:
-        """
-        True if the subscription is currently running and its worker thread is alive.
-        """
-        self._sync_state()
-        return self.state == SubscriptionState.RUNNING
 
 
 class SubscriptionService:

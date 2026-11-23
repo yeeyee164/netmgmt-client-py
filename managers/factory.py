@@ -10,8 +10,8 @@ Currently supported common interfaces:
 """
 from specs.gnmi_client import GNMIClient
 from specs.netconf_client import NetconfClient
+from specs.gnmi_validator import GNMIValidator
 from specs.netconf_validator import NetconfValidator
-from modules.validate import GNMIValidator
 from modules.security import SecurityModule
 
 class ClientFactory:

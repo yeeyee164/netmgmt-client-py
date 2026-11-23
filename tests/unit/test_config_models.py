@@ -329,35 +329,9 @@ class TestClientSemanticExecution(unittest.TestCase):
         mock_session.commit.assert_called_once()
 
 
-class TestWorkersAndManagersSemanticIntegration(unittest.TestCase):
-    def test_manager_factory_with_semantic_sessions(self):
-        from managers.manager import ManagerFactory, UnaryManager, SubscriptionManager
-        from cli.cmd import ParsedConfig
-
-        conn = ConnectionConfig(target="10.0.0.1:9339")
-        get_sess = SessionConfig(connection=conn, protocol=Protocol.GNMI, operation=GetOperation(selector=PathSelector(paths=["/interfaces"])))
-        sub_sess = SessionConfig(
-            connection=conn,
-            protocol=Protocol.GNMI,
-            operation=SubscribeOperation(
-                selector=PathSelector(paths=["/interfaces"]),
-                delivery=DeliveryPolicy(mode=DeliveryMode.PERIODIC, interval=10)
-            )
-        )
-        parsed = ParsedConfig(
-            sessions=[get_sess, sub_sess],
-            outputs=[OutputConfig(
-                format = OutputFormat.JSON,
-                output_type = OutputType.STDOUT,
-            )],
-        )
-        managers, handlers = ManagerFactory.create_managers(parsed)
-        self.assertEqual(len(managers), 2)
-        self.assertIsInstance(managers[0], UnaryManager)
-        self.assertIsInstance(managers[1], SubscriptionManager)
-
-    def test_unary_manager_worker_resolution_semantic(self):
-        from managers.manager import UnaryManager
+class TestWorkersAndServicesSemanticIntegration(unittest.TestCase):
+    def test_unary_worker_resolution_semantic(self):
+        from application.operations import DeviceOperationService
         from managers.unary_worker import GetWorker, SetWorker, CapabilityWorker
 
         conn = ConnectionConfig(target="10.0.0.1:9339")
@@ -365,13 +339,10 @@ class TestWorkersAndManagersSemanticIntegration(unittest.TestCase):
         set_sess = SessionConfig(connection=conn, protocol=Protocol.GNMI, operation=SetOperation(changes=[Change(path="/test", operation=ChangeType.MERGE, value="val")]))
         cap_sess = SessionConfig(connection=conn, protocol=Protocol.GNMI, operation=CapabilitiesOperation())
 
-        mgr = UnaryManager(sessions=[get_sess, set_sess, cap_sess], output_handlers=[MagicMock()])
-        mgr.build_sessions()
-
-        self.assertEqual(len(mgr.sessions), 3)
-        self.assertIsInstance(mgr.sessions[0], GetWorker)
-        self.assertIsInstance(mgr.sessions[1], SetWorker)
-        self.assertIsInstance(mgr.sessions[2], CapabilityWorker)
+        svc = DeviceOperationService()
+        self.assertIsInstance(svc._resolve_worker(get_sess), GetWorker)
+        self.assertIsInstance(svc._resolve_worker(set_sess), SetWorker)
+        self.assertIsInstance(svc._resolve_worker(cap_sess), CapabilityWorker)
 
     def test_set_worker_semantic_execution(self):
         from managers.unary_worker import SetWorker

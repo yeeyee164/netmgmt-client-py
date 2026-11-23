@@ -82,9 +82,6 @@ class SchemaContext:
                         pass
 
 
-from core.schema_errors import SchemaError, SchemaProfileConflictError
-
-
 class ContextRegistry:
     """
     Thread-safe registry managing isolated SchemaContext instances keyed by profile_id.

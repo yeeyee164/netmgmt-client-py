@@ -35,7 +35,7 @@
         },
         "protocols": {
             "netconf" : "10.1.0.101:830",
-            "gnmi" : "10.1.0.101:9339"
+            "gnmi" : "10.1.0.101:57400"
         },
         "yang": { 
             "paths" : "../yang/ocnos_derived",
