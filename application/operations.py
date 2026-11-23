@@ -53,6 +53,82 @@ from modules.formatter import normalize_protocol_payload
 logger = logging.getLogger(__name__)
 
 
+def normalize_protocol_payload(protocol: str, op_type: str, raw_data: Any) -> Any:
+    """
+    Normalizes native protocol payloads (gNMI Protobuf messages, NETCONF XML/RPCReply
+    objects, bytes, Exceptions) into JSON-serializable Python primitives for API callers.
+    """
+    if raw_data is None or isinstance(raw_data, (bool, int, float, str)):
+        return raw_data
+    if isinstance(raw_data, bytes):
+        try:
+            return raw_data.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw_data.hex()
+    if isinstance(raw_data, Exception):
+        return str(raw_data)
+    if isinstance(raw_data, dict):
+        return {
+            str(k): normalize_protocol_payload(protocol, op_type, v)
+            for k, v in raw_data.items()
+        }
+    if isinstance(raw_data, (list, tuple)):
+        return [
+            normalize_protocol_payload(protocol, op_type, item)
+            for item in raw_data
+        ]
+
+    proto_norm = str(protocol or "").strip().lower()
+    if proto_norm == "gnmi" or hasattr(raw_data, "DESCRIPTOR"):
+        from modules.formatter import GNMIFormatter
+
+        cls_name = type(raw_data).__name__
+        op_norm = str(op_type or "").strip().lower().replace("_", "-")
+        if cls_name == "CapabilityResponse" or op_norm in ("capability", "capabilities"):
+            rpc_key = "capability"
+        elif cls_name == "GetResponse" or op_norm in ("get", "get-config"):
+            rpc_key = "get"
+        elif cls_name == "SetResponse" or op_norm in ("set", "edit-config", "edit"):
+            rpc_key = "set"
+        elif cls_name == "SubscribeResponse" or op_norm == "subscribe":
+            rpc_key = "subscribe"
+        else:
+            rpc_key = op_norm
+
+        formatted = GNMIFormatter().format_json(raw_data, rpc=rpc_key, meta=None)
+        if isinstance(formatted, (dict, list)):
+            return normalize_protocol_payload(protocol, op_type, formatted)
+        if hasattr(raw_data, "DESCRIPTOR"):
+            try:
+                from google.protobuf.json_format import MessageToDict
+
+                return MessageToDict(raw_data, preserving_proto_field_name=True)
+            except Exception:
+                pass
+        return str(formatted)
+
+    if proto_norm == "netconf" or hasattr(raw_data, "xml") or hasattr(raw_data, "data_xml"):
+        from modules.formatter import NETCONFFormatter
+
+        op_norm = str(op_type or "").strip().lower().replace("_", "-")
+        if op_norm == "capabilities":
+            op_norm = "capability"
+        elif op_norm == "schema":
+            op_norm = "get-schema"
+        elif op_norm == "edit":
+            op_norm = "edit-config"
+
+        formatted = NETCONFFormatter().format_json(raw_data, rpc=op_norm, meta=None)
+        if isinstance(formatted, dict):
+            inner = formatted.get("data")
+            if inner is not None:
+                return normalize_protocol_payload(protocol, op_type, inner)
+            return normalize_protocol_payload(protocol, op_type, formatted)
+        return normalize_protocol_payload(protocol, op_type, formatted)
+
+    return str(raw_data)
+
+
 class DeviceOperationService:
     """
     Application service executing unary requests against network devices.
