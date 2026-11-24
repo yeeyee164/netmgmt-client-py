@@ -53,6 +53,7 @@ def create_app(settings: Optional[APISettings] = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        effective_settings.validate_startup()
         _initialize_app_state(application, effective_settings)
         try:
             yield

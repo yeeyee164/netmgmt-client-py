@@ -220,5 +220,7 @@ For detailed, in-depth walkthroughs of all CLI flags, options, schema validation
 
 If you are developing or contributing to **`netmgmt-client-py`**:
 * **Architecture, Module Inventory & Guidelines:** Consult [`AGENTS.md`](AGENTS.md) for a concise component breakdown of each directory (`api/`, `application/`, `cli/`, `config/`, `core/`, `managers/`, `modules/`, `specs/`).
+* **FastAPI Deployment Invariants:** When running the FastAPI server (`uvicorn api.main:app`), set explicit credentials via `NETMGMT_API_KEYS` when `NETMGMT_AUTH_ENABLED=true` (there is no default fallback token) and run with a single worker (`--workers 1`, `WEB_CONCURRENCY=1`) because device inventory, logical sessions, and subscriptions are held in process memory.
+* **Supported Public Packages:** Import from the top-level packages (`api`, `application`, `cli`, `config`, `core`, `managers`, `modules`, `specs`), which replace removed internal submodules (`managers.manager`, `specs.client`, `modules.validate`).
 * **YANG Schema & Caching Engine:** Consult [`core/README.md`](core/README.md) for data models, SQLite cache schemas, and `libyang` integration details.
 * **Running Tests:** Run the offline test suite via `pytest -m "not live" tests/` (or `pytest tests/unit/`).

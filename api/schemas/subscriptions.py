@@ -53,6 +53,7 @@ class SubscriptionInfoResponseSchema(BaseModel):
     state: str
     error: str | None = None
     is_poll_mode: bool = False
+    dropped_count: int = 0
 
 
 class SubscriptionCommandResponseSchema(BaseModel):
@@ -74,3 +75,4 @@ class StreamEventSchema(BaseModel):
     timestamp: float
     is_sync_marker: bool = False
     error: str | None = None
+    sequence: int | None = None

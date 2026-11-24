@@ -40,9 +40,10 @@ def _parse_api_keys(val: Optional[str]) -> dict[str, str]:
     """
     Parses `NETMGMT_API_KEYS` formatted as `owner1:token1,owner2:token2`
     or plain `token1,token2` (defaulting owner to 'api-client') into `{token: owner_id}`.
+    Returns an empty dict when unset, empty, or containing only malformed entries.
     """
     if not val or not val.strip():
-        return {"dev-token": "dev-admin"}
+        return {}
     mapping: dict[str, str] = {}
     for entry in val.split(","):
         item = entry.strip()
@@ -50,14 +51,27 @@ def _parse_api_keys(val: Optional[str]) -> dict[str, str]:
             continue
         if ":" in item:
             owner_id, token = item.split(":", 1)
-            owner_id = owner_id.strip() or "api-client"
+            owner_id = owner_id.strip()
             token = token.strip()
+            if not owner_id or not token:
+                continue
         else:
             owner_id = "api-client"
             token = item
         if token:
             mapping[token] = owner_id
-    return mapping or {"dev-token": "dev-admin"}
+    return mapping
+
+
+def _parse_workers() -> int:
+    for env_name in ("NETMGMT_WORKERS", "WEB_CONCURRENCY", "UVICORN_WORKERS"):
+        raw = os.getenv(env_name)
+        if raw is not None and raw.strip():
+            try:
+                return int(raw.strip())
+            except ValueError as exc:
+                raise ValueError(f"Invalid integer in {env_name}={raw!r}") from exc
+    return 1
 
 
 @dataclass(frozen=True)
@@ -73,10 +87,11 @@ class APISettings:
     """Configuration for the FastAPI presentation tier."""
 
     auth_enabled: bool = True
-    api_keys: dict[str, str] = field(default_factory=lambda: {"dev-token": "dev-admin"})
+    api_keys: dict[str, str] = field(default_factory=dict)
     default_owner_id: str = "anonymous"
     rpc_concurrency_limit: int = 32
     session_ttl_seconds: float = 300.0
+    workers: int = 1
     allow_adhoc_endpoints: bool = True
     allowed_targets: tuple[str, ...] = ()
     allow_client_filesystem_paths: bool = False
@@ -86,6 +101,20 @@ class APISettings:
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     )
+
+    def validate_startup(self) -> None:
+        """Validates production security and single-process deployment invariants at startup."""
+        if self.workers > 1:
+            raise RuntimeError(
+                f"Multi-process deployment (workers={self.workers}) is not supported because "
+                "device registry, logical sessions, and telemetry subscriptions are stored in "
+                "process memory. Run with a single worker (--workers 1)."
+            )
+        if self.auth_enabled and not self.api_keys:
+            raise RuntimeError(
+                "API authentication is enabled (NETMGMT_AUTH_ENABLED=true), but no valid API keys "
+                "are configured. Set NETMGMT_API_KEYS (e.g. 'owner:secret-token')."
+            )
 
     @classmethod
     def from_env(cls) -> "APISettings":
@@ -100,6 +129,7 @@ class APISettings:
             or "anonymous",
             rpc_concurrency_limit=max(1, int(limit_raw)),
             session_ttl_seconds=max(1.0, float(ttl_raw)),
+            workers=_parse_workers(),
             allow_adhoc_endpoints=_parse_bool(
                 os.getenv("NETMGMT_ALLOW_ADHOC_ENDPOINTS"), True
             ),
@@ -171,6 +201,11 @@ def _resolve_principal(
     query_token: Optional[str] = None,
     x_owner_id: Optional[str] = None,
 ) -> Principal:
+    if settings.auth_enabled and not settings.api_keys:
+        raise APIAuthenticationError(
+            "API authentication is enabled, but no valid API keys are configured."
+        )
+
     token = _extract_token(authorization, x_api_key, query_token)
 
     if token is not None:

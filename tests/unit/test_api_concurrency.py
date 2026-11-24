@@ -1016,3 +1016,82 @@ class TestScenario7RealUvicornSocketBoundary:
 
         assert not srv_thread.is_alive(), "Uvicorn server hung during lifespan shutdown"
         mock_worker.stop.assert_called_once()
+
+    def test_execute_session_operations_does_not_block_event_loop_during_expired_cleanup(
+        self,
+    ):
+        class _SlowCleanupClient:
+            def __init__(self, target: str):
+                self.target = target
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                time.sleep(0.30)
+
+            def execute_transaction(self, op):
+                time.sleep(0.10)
+                return {"ok": True}
+
+            def execute(self, op):
+                return {"ok": True}
+
+        harness = AsyncConcurrencyHarness()
+        reg = harness.app.state.device_registry
+        reg.register_device(
+            "netopeer2",
+            AdhocEndpointDTO(
+                target="10.0.0.1:830",
+                protocol="netconf",
+                username="root",
+                password="pw",
+            ),
+        )
+        sess_mgr = DeviceSessionManager(
+            device_registry=reg,
+            default_ttl_seconds=30.0,
+            client_factory=lambda **kw: _SlowCleanupClient(target=kw["target"]),
+        )
+        harness.app.state.session_manager = sess_mgr
+        harness.app.state.operation_service._session_manager = sess_mgr
+
+        s_exp = sess_mgr.create_session(
+            owner_id="alice", device_id="netopeer2", ttl_seconds=0.05
+        )
+        s_act = sess_mgr.create_session(
+            owner_id="alice", device_id="netopeer2", ttl_seconds=30.0
+        )
+        with sess_mgr.acquire_session(s_exp.session_id, owner_id="alice") as lease:
+            lease.locked_datastores.add("candidate")
+        time.sleep(0.08)
+
+        async def _verify_non_blocking():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=harness.app),
+                base_url="http://test",
+            ) as ac:
+                async def _run_ops():
+                    return await ac.post(
+                        f"/api/v1/sessions/{s_act.session_id}/operations",
+                        headers=ALICE_HEADERS,
+                        json={"operations": [{"op_type": "capabilities"}]},
+                    )
+
+                t_start = time.perf_counter()
+
+                async def _run_health():
+                    await asyncio.sleep(0.02)
+                    resp = await ac.get("/healthz")
+                    return resp.status_code, time.perf_counter() - t_start
+
+                ops_resp, (health_status, health_elapsed) = await asyncio.gather(
+                    _run_ops(), _run_health()
+                )
+                assert ops_resp.status_code == 200
+                assert health_status == 200
+                assert health_elapsed < 0.20, (
+                    f"Event loop blocked by expired session cleanup: /healthz finished at {health_elapsed:.3f}s"
+                )
+
+        asyncio.run(_verify_non_blocking())

@@ -127,8 +127,13 @@ async def execute_session_operations(
     limiter: anyio.CapacityLimiter = Depends(get_rpc_limiter),
 ) -> ExecutionResultSchema:
     """Executes operations within an existing managed logical session."""
-    session_info = session_manager.get_session_info(
-        session_id, owner_id=principal.owner_id
+    session_info = await anyio.to_thread.run_sync(
+        partial(
+            session_manager.get_session_info,
+            session_id,
+            owner_id=principal.owner_id,
+        ),
+        limiter=limiter,
     )
     request_dto = to_session_execution_request_dto(
         payload, session_info, settings=settings

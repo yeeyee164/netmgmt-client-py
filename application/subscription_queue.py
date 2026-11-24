@@ -17,11 +17,12 @@ _STOP_SENTINEL = object()
 
 
 class _ConsumerQueue(queue.Queue):
-    """Per-consumer bounded queue carrying a close flag for immediate stream wakeups."""
+    """Per-consumer bounded queue carrying a close flag and dropped-event counter."""
 
     def __init__(self, maxsize: int = 0):
         super().__init__(maxsize=maxsize)
         self.closed: bool = False
+        self.dropped_count: int = 0
 
 
 class FanoutQueue(queue.Queue):
@@ -35,31 +36,42 @@ class FanoutQueue(queue.Queue):
         self._fanout_lock = threading.Lock()
         self._consumers: Dict[str, _ConsumerQueue] = {}
         self._closed: bool = False
+        self.dropped_count: int = 0
+        self._next_seq: int = 1
 
     @staticmethod
-    def _drop_oldest_and_put(q: queue.Queue, item: Any) -> None:
+    def _drop_oldest_and_put(q: queue.Queue, item: Any) -> bool:
+        dropped = False
         try:
             queue.Queue.put(q, item, block=False)
         except queue.Full:
             try:
                 _ = queue.Queue.get_nowait(q)
                 q.task_done()
+                dropped = True
+                q.dropped_count = getattr(q, "dropped_count", 0) + 1
             except (queue.Empty, ValueError):
                 pass
             try:
                 queue.Queue.put(q, item, block=False)
             except queue.Full:
                 pass
+        return dropped
 
     def put(self, item: Any, block: bool = True, timeout: Optional[float] = None) -> None:
         with self._fanout_lock:
             if self._closed:
                 return
+            seq = self._next_seq
+            self._next_seq += 1
+            if isinstance(item, dict) and "sequence" not in item:
+                item = {**item, "sequence": seq}
             if not self._consumers:
                 self._drop_oldest_and_put(self, item)
                 return
             for cq in self._consumers.values():
-                self._drop_oldest_and_put(cq, item)
+                if self._drop_oldest_and_put(cq, item):
+                    self.dropped_count += 1
 
     def put_nowait(self, item: Any) -> None:
         self.put(item, block=False)
@@ -68,6 +80,7 @@ class FanoutQueue(queue.Queue):
         with self._fanout_lock:
             cq = _ConsumerQueue(maxsize=self.maxsize)
             if not self._consumers:
+                cq.dropped_count = self.dropped_count
                 # Drain any pre-buffered events into the first attached consumer.
                 while True:
                     try:
