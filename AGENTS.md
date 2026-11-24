@@ -79,6 +79,7 @@ This section provides a structured inventory of the codebase to help contributor
 * **Presentation isolation:** `api/` must import only from `application/` (never `config/`, `core/`, `managers/`, or `specs/` directly). Core engine packages (`config/`, `core/`, `managers/`, `specs/`) must never import `fastapi`, `api/`, or `cli/`.
 * **Structured results:** Application services return DTOs (`ExecutionResultDTO`, `StreamEventDTO`) and must not depend on CLI `OutputHandler` sinks.
 * **Preservation rules:** Do not introduce new upward imports from `util/`/`modules/`/`managers/` into `specs/`/`cli/`/`application/`. Keep `tests/unit/` isolated and fast without live network calls.
+* **API deployment & public packages:** FastAPI deployments fail closed when `NETMGMT_AUTH_ENABLED=true` without explicit `NETMGMT_API_KEYS` (no default fallback token) and require single-worker execution (`--workers 1`, `WEB_CONCURRENCY=1`) because device inventory, logical sessions, and subscriptions reside in process memory. Supported public package entry points are `api`, `application`, `cli`, `config`, `core`, `managers`, `modules`, and `specs` (replacing removed internal submodules `managers.manager`, `specs.client`, and `modules.validate`).
 
 ### Key Reference Documents
 - **Application Service Layer Spec:** [`docs/application_service_layer_specification.md`](docs/application_service_layer_specification.md)

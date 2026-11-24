@@ -11,6 +11,7 @@ import pytest
 
 from api.deps import (
     APISettings,
+    _parse_api_keys,
     get_operation_service,
     get_schema_service,
 )
@@ -658,3 +659,72 @@ class TestSchemaRoutes:
         )
         assert val_resp.status_code == 200
         assert val_resp.json() == {"valid": True, "errors": []}
+
+
+class TestDeploymentHardeningAndPublicPackages:
+    def test_parse_api_keys_no_default_fallback(self):
+        assert _parse_api_keys(None) == {}
+        assert _parse_api_keys("") == {}
+        assert _parse_api_keys("   ") == {}
+        assert _parse_api_keys(":") == {}
+        assert _parse_api_keys("owner:") == {}
+        assert _parse_api_keys(":secret") == {}
+        assert _parse_api_keys("alice:tok1, bob:tok2") == {
+            "tok1": "alice",
+            "tok2": "bob",
+        }
+        assert _parse_api_keys("plain-tok") == {"plain-tok": "api-client"}
+
+    def test_startup_fails_closed_when_auth_enabled_without_api_keys(self):
+        app = create_app(APISettings(auth_enabled=True, api_keys={}))
+        with pytest.raises(RuntimeError, match="no valid API keys"):
+            with TestClient(app):
+                pass
+
+        # Direct call without lifespan must also reject predictable dev-token
+        client = TestClient(app)
+        resp = client.get(
+            "/api/v1/devices", headers={"Authorization": "Bearer dev-token"}
+        )
+        assert resp.status_code == 401
+
+    def test_startup_rejects_multi_worker_deployment(self):
+        app = create_app(
+            APISettings(auth_enabled=True, api_keys={"tok": "alice"}, workers=2)
+        )
+        with pytest.raises(RuntimeError, match="Multi-process deployment"):
+            with TestClient(app):
+                pass
+
+    def test_public_top_level_package_exports(self):
+        import api
+        import application
+        import cli
+        import config
+        import core
+        import managers
+        import modules
+        import specs
+
+        assert {"app", "create_app"} <= set(api.__all__)
+        assert {"DeviceOperationService", "SubscriptionService", "FanoutQueue"} <= set(
+            application.__all__
+        )
+        assert {"build_args", "config_builder", "CLIApplicationRunner"} <= set(
+            cli.__all__
+        )
+        assert {"SessionConfig", "Protocol", "SecurityProfile"} <= set(config.__all__)
+        assert {"SchemaManager", "SchemaDB", "SchemaContext"} <= set(core.__all__)
+        assert {"ClientFactory", "ValidatorFactory", "SubscribeSession"} <= set(
+            managers.__all__
+        )
+        assert {"OutputHandler", "SecurityModule", "normalize_protocol_payload"} <= set(
+            modules.__all__
+        )
+        assert {
+            "BaseClient",
+            "GNMIClient",
+            "NetconfClient",
+            "GNMIValidator",
+            "NetconfValidator",
+        } <= set(specs.__all__)

@@ -2,6 +2,7 @@
 from unittest.mock import MagicMock, patch
 import pytest
 
+from application.subscription_queue import FanoutQueue
 from application.subscriptions import SubscriptionService, SubscriptionState
 from application.dto import (
     AdhocEndpointDTO,
@@ -167,4 +168,41 @@ class TestSubscriptionService:
         gen = sub_svc.consume_events_generator(sub_id, timeout=0.01)
         items = list(gen)
         assert len(items) == 0
+
+    @patch("application.subscriptions.SubscribeSession")
+    def test_fanout_queue_overflow_tracks_dropped_count_and_sequence_gaps(self, mock_session_cls):
+        mock_worker = MagicMock()
+        mock_worker.is_running = True
+        mock_session_cls.return_value = mock_worker
+
+        fq = FanoutQueue(maxsize=3)
+        cid = "c1"
+        cq = fq.register_consumer(cid)
+        for i in range(5):
+            fq.put({"data": {"idx": i}})
+
+        assert fq.dropped_count == 2
+        assert cq.dropped_count == 2
+
+        drained = []
+        while not cq.empty():
+            drained.append(cq.get_nowait())
+        assert [item["data"]["idx"] for item in drained] == [2, 3, 4]
+        assert [item["sequence"] for item in drained] == [3, 4, 5]
+
+        # Also verify SubscriptionService exposes dropped_count and sequence via get_subscription_info / get_events
+        sub_svc = SubscriptionService()
+        req = ExecutionRequestDTO(
+            adhoc_endpoint=AdhocEndpointDTO(target="10.0.0.1:57400", protocol="gnmi"),
+            operations=[OperationStepDTO(op_type="subscribe", paths=["/interfaces"])],
+        )
+        sub_id = sub_svc.start_subscription(req, queue_size=3)
+        managed = sub_svc._get_managed(sub_id)
+        for i in range(5):
+            managed.data_queue.put({"data": {"idx": i}})
+
+        info = sub_svc.get_subscription_info(sub_id)
+        assert info["dropped_count"] == 2
+        events = sub_svc.get_events(sub_id, timeout=0.05, max_events=10)
+        assert [e.sequence for e in events] == [3, 4, 5]
 

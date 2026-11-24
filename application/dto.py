@@ -516,6 +516,7 @@ class StreamEventDTO:
     timestamp: float = field(default_factory=time.time)
     is_sync_marker: bool = False
     error: Optional[str] = None
+    sequence: Optional[int] = None
 
 
 @dataclass(kw_only=True)

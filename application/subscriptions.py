@@ -487,6 +487,7 @@ class SubscriptionService:
                     "is_alive": m.is_alive,
                     "state": m.state.value,
                     "error": m.error,
+                    "dropped_count": int(getattr(m.data_queue, "dropped_count", 0)),
                 }
                 for m in self._active_subscriptions.values()
                 if owner_id is None or m.owner_id == owner_id
@@ -552,6 +553,7 @@ class SubscriptionService:
             "state": managed.state.value,
             "error": managed.error,
             "is_poll_mode": self.is_poll_subscription(subscription_id, owner_id=owner_id),
+            "dropped_count": int(getattr(managed.data_queue, "dropped_count", 0)),
         }
 
     def has_active_threads(self) -> bool:
@@ -623,4 +625,5 @@ class SubscriptionService:
             timestamp=item.get("timestamp", time.time()),
             is_sync_marker=item.get("is_sync_marker", False),
             error=str(item.get("error")) if item.get("error") is not None else None,
+            sequence=item.get("sequence"),
         )

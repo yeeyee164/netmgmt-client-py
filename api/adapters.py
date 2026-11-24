@@ -329,6 +329,7 @@ def to_subscription_info_response(
         state=info["state"],
         error=redact_sensitive_text(info.get("error")),
         is_poll_mode=bool(info.get("is_poll_mode", False)),
+        dropped_count=int(info.get("dropped_count", 0)),
     )
 
 
@@ -343,6 +344,7 @@ def to_stream_event_schema(dto: StreamEventDTO) -> StreamEventSchema:
         timestamp=dto.timestamp,
         is_sync_marker=dto.is_sync_marker,
         error=redact_sensitive_text(dto.error),
+        sequence=dto.sequence,
     )
 
 
