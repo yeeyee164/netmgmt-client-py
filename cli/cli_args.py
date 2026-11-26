@@ -341,7 +341,7 @@ def build_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument('--tls-ca', default='', help="Path to CA certificate")
     parser.add_argument('--tls-cert', default='', help="Path to client certificate")
     parser.add_argument('--tls-key', default='', help="Path to client private key")
-    parser.add_argument('--skip-verify', action='store_true', help="Path to CA certificate")
+    parser.add_argument('--skip-verify', action='store_true', help="Skip TLS server certificate verification")
     parser.add_argument('--tls-server-name', default='', help="sets the server name to be used when verifying the hostname on the returned certificates. If 'skip-verify' was set, this options is meaningless.")
     parser.add_argument('--tls-version', default='1.3', choices=['1.0','1.1','1.2','1.3'],
                          help="set TLS version. Default version is 1.3")

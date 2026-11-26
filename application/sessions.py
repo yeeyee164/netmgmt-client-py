@@ -225,7 +225,7 @@ class DeviceSessionManager:
             username=endpoint.username or "",
             password=endpoint.password or "",
             security=security,
-            insecure=bool(endpoint.insecure or endpoint.skip_verify),
+            insecure=bool(endpoint.insecure),
         )
         try:
             client.__enter__()

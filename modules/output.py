@@ -48,8 +48,43 @@ class OutputHandler:
             return
 
         raw_data = message.get('data')
+        error_val = message.get('error')
         protocol = message.get('protocol')
         sub_name = message.get('subscription_name', '')
+        rpc = message.get('rpc')
+
+        meta = {
+            'source': message.get('target'),
+        }
+        if message.get('op_id'):
+            meta['op_id'] = message.get('op_id')
+        if sub_name != '':
+            meta['subscription_name'] = sub_name
+        meta = {k: v for k, v in meta.items() if v is not None}
+
+        if error_val is not None:
+            if self.format == 'json':
+                err_payload = dict(meta)
+                if rpc:
+                    err_payload['rpc'] = rpc
+                err_payload['data'] = None
+                err_payload['error'] = str(error_val)
+                output_str = json.dumps(err_payload, indent=2)
+            elif self.format == 'xml':
+                from xml.sax.saxutils import escape
+                output_str = f"<rpc-error><error-message>{escape(str(error_val))}</error-message></rpc-error>"
+            elif self.format == 'text':
+                op_id = message.get('op_id')
+                op_str = f"{rpc} | op_id: {op_id}" if (rpc and op_id) else (rpc or "")
+                if op_str:
+                    output_str = f"\n--- [Operation: {op_str}] ---\nError: {error_val}"
+                else:
+                    output_str = f"\nError: {error_val}"
+            else:
+                output_str = str(message)
+            self.stream.write(output_str + '\n')
+            self.stream.flush()
+            return
 
         # Instantiate protocol formatter
         if protocol == 'netconf':
@@ -58,18 +93,6 @@ class OutputHandler:
             self.formatter = GNMIFormatter()
 
         if self.format in ['json', 'xml']:
-            meta = {
-                'source': message.get('target'),
-            }
-            if message.get('op_id'):
-                meta['op_id'] = message.get('op_id')
-
-            if sub_name != '':
-                meta['subscription_name'] = sub_name
-
-            rpc = message.get('rpc')
-            meta = {k: v for k, v in meta.items() if v is not None}
-
             if self.format == 'json':
                 formatted_data = self.formatter.format_json(raw_data, rpc=rpc, meta=meta)
                 output_str = json.dumps(formatted_data, indent=2)
@@ -78,7 +101,6 @@ class OutputHandler:
                 output_str = formatted_data
         elif self.format == 'text':
             formatted_data = self.formatter.format_text(raw_data)
-            rpc = message.get('rpc')
             op_id = message.get('op_id')
             op_str = f"{rpc} | op_id: {op_id}" if (rpc and op_id) else (rpc or "")
             if op_str:
