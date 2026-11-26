@@ -12,7 +12,12 @@ import time
 from typing import Any, List, Optional, Sequence
 
 from application.devices import DeviceRegistryService
-from application.dto import ExecutionRequestDTO, ExecutionResultDTO, expand_request_repetitions
+from application.dto import (
+    ExecutionRequestDTO,
+    ExecutionResultDTO,
+    StepResultDTO,
+    expand_request_repetitions,
+)
 from application.operations import DeviceOperationService
 from application.subscriptions import SubscriptionService
 from modules.output import OutputHandler
@@ -36,6 +41,7 @@ class CLIStreamRunner:
             device_registry=device_registry
         )
         self.data_queue: queue.Queue = queue.Queue(maxsize=1000)
+        self.stream_errors: List[dict] = []
 
     def run(
         self,
@@ -46,6 +52,7 @@ class CLIStreamRunner:
         Starts streaming subscriptions for the given requests and blocks until completion
         or KeyboardInterrupt, routing received telemetry events to output_handlers.
         """
+        self.stream_errors = []
         expanded_requests = expand_request_repetitions(requests)
 
         if not expanded_requests:
@@ -79,6 +86,8 @@ class CLIStreamRunner:
             while self.subscription_service.has_active_threads() or not self.data_queue.empty():
                 try:
                     message = self.data_queue.get(timeout=1.0)
+                    if message.get("error") is not None:
+                        self.stream_errors.append(message)
                     logger.debug(
                         f"\n--- [Telemetry from Session: {message.get('session_id')} | "
                         f"Target: {message.get('target')}] ---"
@@ -220,6 +229,25 @@ class CLIApplicationRunner:
                     requests=stream_requests,
                     output_handlers=handlers,
                 )
+                for err_msg in getattr(stream_runner, "stream_errors", []):
+                    err_str = str(err_msg.get("error"))
+                    results.append(
+                        ExecutionResultDTO(
+                            target=str(err_msg.get("target") or "stream"),
+                            protocol=str(err_msg.get("protocol") or "gnmi"),
+                            success=False,
+                            results=[
+                                StepResultDTO(
+                                    op_type="subscribe",
+                                    success=False,
+                                    error=err_str,
+                                    error_code="STREAM_ERROR",
+                                )
+                            ],
+                            error_summary=err_str,
+                            error_code="STREAM_ERROR",
+                        )
+                    )
         finally:
             for handler in handlers:
                 handler.close()

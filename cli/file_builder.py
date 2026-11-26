@@ -80,14 +80,15 @@ class FileConfigBuilder(ConfigBuilder):
             )
         )
         global_protocol = global_cfg.get('protocol', d.get('protocol', self.protocol))
-        global_sec_cfg = global_cfg.get('security', {})
+        global_sec_cfg = global_cfg.get('security', {}) if isinstance(global_cfg.get('security'), dict) else {}
         global_security = SecurityProfile(
             tls_ca=global_sec_cfg.get('tls_ca', ''),
             tls_cert=global_sec_cfg.get('tls_cert', ''),
             tls_key=global_sec_cfg.get('tls_key', ''),
-            skip_verify=global_sec_cfg.get('skip_verify', False),
+            skip_verify=bool(global_sec_cfg.get('skip_verify', False)),
             tls_server_name=global_sec_cfg.get('tls_server_name', ''),
             tls_version=global_sec_cfg.get('tls_version', ''),
+            ssh_key=global_sec_cfg.get('ssh_key', ''),
         )
         debug = global_cfg.get('debug', False)
         fallback_global = dict(d)
@@ -157,12 +158,38 @@ class FileConfigBuilder(ConfigBuilder):
             t_insecure = tgt_info.get('insecure', reg_ep.insecure if reg_ep else global_insecure)
             proto_enum = Protocol.GNMI if t_protocol.lower() == 'gnmi' else Protocol.NETCONF
             t_schema = _parse_schema_config(tgt_info.get('schema'), fallback_dict=tgt_info) if ('schema' in tgt_info or any(k in tgt_info for k in ('yang_dirs', 'yang_dir', 'validate', 'enable_schema_validation'))) else global_schema
+            base_security = (
+                SecurityProfile(
+                    tls_ca=reg_ep.tls_ca if reg_ep.tls_ca is not None else global_security.tls_ca,
+                    tls_cert=reg_ep.tls_cert if reg_ep.tls_cert is not None else global_security.tls_cert,
+                    tls_key=reg_ep.tls_key if reg_ep.tls_key is not None else global_security.tls_key,
+                    skip_verify=bool(reg_ep.skip_verify) if reg_ep.skip_verify else global_security.skip_verify,
+                    tls_server_name=reg_ep.tls_server_name if reg_ep.tls_server_name is not None else global_security.tls_server_name,
+                    tls_version=reg_ep.tls_version if reg_ep.tls_version is not None else global_security.tls_version,
+                    ssh_key=reg_ep.ssh_key if reg_ep.ssh_key is not None else global_security.ssh_key,
+                )
+                if reg_ep is not None
+                else global_security
+            )
+            t_sec_override = tgt_info.get('security') if isinstance(tgt_info.get('security'), dict) else {}
+            if t_sec_override:
+                t_security = SecurityProfile(
+                    tls_ca=t_sec_override.get('tls_ca', base_security.tls_ca),
+                    tls_cert=t_sec_override.get('tls_cert', base_security.tls_cert),
+                    tls_key=t_sec_override.get('tls_key', base_security.tls_key),
+                    skip_verify=bool(t_sec_override.get('skip_verify', base_security.skip_verify)),
+                    tls_server_name=t_sec_override.get('tls_server_name', base_security.tls_server_name),
+                    tls_version=t_sec_override.get('tls_version', base_security.tls_version),
+                    ssh_key=t_sec_override.get('ssh_key', base_security.ssh_key),
+                )
+            else:
+                t_security = base_security
 
             conn = ConnectionConfig(
                 target=str(resolved_target),
                 username=t_username,
                 password=t_password,
-                security=global_security,
+                security=t_security,
                 insecure=t_insecure,
             )
             exec_cfg = ExecutionConfig(
@@ -235,7 +262,7 @@ class FileConfigBuilder(ConfigBuilder):
                 target=str(resolved_target),
                 username=t_username,
                 password=t_password,
-                security=global_security,
+                security=t_security,
                 insecure=t_insecure,
             )
             proto_enum = Protocol.GNMI if t_protocol.lower() == 'gnmi' else Protocol.NETCONF
@@ -243,7 +270,7 @@ class FileConfigBuilder(ConfigBuilder):
             if is_capability:
                 op_obj = CapabilitiesOperation()
             elif is_get_schema:
-                ident = tgt_info.get('identifier') or (t_get_list[0] if t_get_list else '')
+                ident = tgt_info.get('identifier')
                 op_obj = GetSchemaOperation(
                     identifier=ident,
                     version=tgt_info.get('version'),

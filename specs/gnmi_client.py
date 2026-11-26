@@ -71,12 +71,7 @@ class GNMIClient(BaseClient):
             **kwargs,
         ):
         self.target = target
-        self.metadata = [("username", username), ("password", password)]
-        if username and password:
-            self.metadata = [
-                ('username', username),
-                ('password', password)
-            ]
+        self.metadata = [("username", username), ("password", password)] if (username or password) else []
 
         # Configure from keyword arguments
         self.insecure = kwargs.get('insecure', False)
@@ -103,8 +98,8 @@ class GNMIClient(BaseClient):
         if self.insecure:
             self.channel = grpc.insecure_channel(self.target)
         elif self.security_module is not None:
-            creds = self.security_module.get_grpc_credentials()
-            options = self.security_module.get_grpc_options()
+            creds = self.security_module.get_grpc_credentials(target=self.target)
+            options = self.security_module.get_grpc_options(target=self.target)
             self.channel = grpc.secure_channel(self.target, creds, options=options)
         else:
             raise NotImplementedError("present security information or run insecure mode")

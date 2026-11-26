@@ -41,7 +41,7 @@ def session_to_execution_request(session: SessionConfig, device_id: Optional[str
         tls_ca=sec.tls_ca if (sec and sec.tls_ca) else None,
         tls_cert=sec.tls_cert if (sec and sec.tls_cert) else None,
         tls_key=sec.tls_key if (sec and sec.tls_key) else None,
-        skip_verify=bool(sec.skip_verify) if sec else bool(conn.insecure),
+        skip_verify=bool(sec.skip_verify) if sec else False,
         insecure=bool(conn.insecure),
         tls_server_name=sec.tls_server_name if (sec and getattr(sec, "tls_server_name", None)) else None,
         tls_version=sec.tls_version if (sec and getattr(sec, "tls_version", None)) else None,

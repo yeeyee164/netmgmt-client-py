@@ -259,7 +259,7 @@ class GNMIFormatter(ProtocolFormatter):
         
         All formats were depending on `rpc`.
         """
-        if isinstance(raw_data, Exception):
+        if isinstance(raw_data, (Exception, str)):
             err_dict = {"error": str(raw_data)}
             if meta:
                 err_dict.update(meta)

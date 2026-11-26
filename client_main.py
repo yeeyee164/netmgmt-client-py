@@ -28,7 +28,9 @@ if __name__ == '__main__':
 
     # run configured client via Application Service Layer runner
     try:
-        CLIApplicationRunner.execute(cfg=cfg)
+        results = CLIApplicationRunner.execute(cfg=cfg)
+        if any(not getattr(res, "success", True) for res in (results or [])):
+            sys.exit(1)
     except Exception as e:
         logger.error(f"Fatal Engine error: {e}", exc_info=True)
         sys.exit(1)
