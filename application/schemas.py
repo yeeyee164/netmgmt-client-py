@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from core.schema_manager import SchemaManager
 from core.schema_db import SchemaDB
 from application.dto import ExecutionRequestDTO
+from modules.stats_hooks import NOOP_STATS_RECORDER, StatsRecorder
 
 
 class SchemaCatalogService:
@@ -25,6 +26,7 @@ class SchemaCatalogService:
         self,
         schema_manager: Optional[SchemaManager] = None,
         schema_db: Optional[SchemaDB] = None,
+        stats_recorder: Optional[StatsRecorder] = None,
     ):
         """
         Initializes the schema catalog service with optional schema manager and database instances.
@@ -32,11 +34,31 @@ class SchemaCatalogService:
         Args:
             schema_manager: Optional custom SchemaManager instance (default: newly instantiated).
             schema_db: Optional custom SchemaDB instance (default: newly instantiated).
+            stats_recorder: Optional StatsRecorder for schema cache and validation metrics.
         """
         self._schema_manager = schema_manager or SchemaManager()
         self._schema_db = schema_db or self._schema_manager.db
+        self._stats_recorder: StatsRecorder = stats_recorder or NOOP_STATS_RECORDER
+        if stats_recorder is not None and hasattr(self._schema_manager, "set_stats_recorder"):
+            self._schema_manager.set_stats_recorder(self._stats_recorder)
+        if hasattr(self._stats_recorder, "register_gauge_provider"):
+            self._stats_recorder.register_gauge_provider(
+                "schema_profiles_loaded",
+                self._loaded_profiles_count,
+            )
 
-    def validate_request_schema(self, request: ExecutionRequestDTO) -> List[str]:
+    def _loaded_profiles_count(self) -> int:
+        registry = getattr(self._schema_manager, "registry", None)
+        if registry is not None and hasattr(registry, "profile_count"):
+            return int(registry.profile_count())
+        return 0
+
+    def validate_request_schema(
+        self,
+        request: ExecutionRequestDTO,
+        *,
+        stats_recorder: Optional[StatsRecorder] = None,
+    ) -> List[str]:
         """
         Validates operations in an ExecutionRequestDTO against compiled YANG schema nodes.
 
@@ -46,12 +68,17 @@ class SchemaCatalogService:
         Args:
             request: `ExecutionRequestDTO` containing operation steps, schema directories,
                 and optional schema profile identifier.
+            stats_recorder: Optional per-call StatsRecorder (e.g. ExecutionStatsScope).
 
         Returns:
             List of string validation error diagnostics (empty list if all steps are valid).
         """
         profile_id = request.schema_profile_id or "default"
         search_dirs = [Path(p) for p in request.schema_dirs]
+        rec = stats_recorder or self._stats_recorder
+        proto_str = request.protocol or (
+            request.adhoc_endpoint.protocol if request.adhoc_endpoint else "unknown"
+        )
 
         errors: List[str] = []
         try:
@@ -64,19 +91,28 @@ class SchemaCatalogService:
             # Validate simple paths
             for p in step.paths:
                 try:
-                    self._schema_manager.validate_path(path=p, profile_id=profile_id)
+                    self._schema_manager.validate_path(
+                        path=p,
+                        profile_id=profile_id,
+                        stats_recorder=rec,
+                    )
                 except Exception as e:
                     errors.append(f"Step {step_idx} ({step.op_type}) invalid path '{p}': {e}")
 
             # Validate mutation changes
             for change in step.changes:
                 try:
-                    self._schema_manager.validate_path(path=change.path, profile_id=profile_id)
+                    self._schema_manager.validate_path(
+                        path=change.path,
+                        profile_id=profile_id,
+                        stats_recorder=rec,
+                    )
                     if change.value is not None:
                         self._schema_manager.validate_payload(
                             path=change.path,
                             value=change.value,
                             profile_id=profile_id,
+                            stats_recorder=rec,
                         )
                 except Exception as e:
                     errors.append(f"Step {step_idx} ({step.op_type}) mutation error on '{change.path}': {e}")

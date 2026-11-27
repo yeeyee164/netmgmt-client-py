@@ -18,6 +18,7 @@ from specs.base_client import BaseClient, UnsupportedOperationError
 from specs.stream_types import StreamCommandType, StreamCommand, StreamContext, StreamEvent
 from modules.path import parse_path
 from modules.security import SecurityModule
+from modules.stats_hooks import NOOP_STATS_RECORDER, StatsRecorder
 from config.schema import SchemaConfig, SchemaProfile, ModuleRef
 from config.operations import (
     CapabilitiesOperation,
@@ -81,6 +82,8 @@ class GNMIClient(BaseClient):
         schema_cfg = kwargs.get('schema_config') or kwargs.get('schema')
         self.schema_config = schema_cfg if isinstance(schema_cfg, SchemaConfig) else SchemaConfig()
         self.schema_profile: Optional[SchemaProfile] = None
+        self.stats_recorder: StatsRecorder = kwargs.get('stats_recorder') or NOOP_STATS_RECORDER
+        self._last_rpc_metrics: Optional[dict[str, Any]] = None
 
         self.encoding_map = {
             'json': gnmi_pb2.JSON if gnmi_pb2 else 0,
@@ -116,8 +119,48 @@ class GNMIClient(BaseClient):
     # Semantic Intent Operations
     # =========================================================================
 
+    def consume_last_rpc_metrics(self) -> Optional[dict[str, Any]]:
+        """Returns and clears wire RPC telemetry collected by the most recent RPC."""
+        metrics = self._last_rpc_metrics
+        self._last_rpc_metrics = None
+        return metrics
+
+    @staticmethod
+    def _classify_error(exc: Exception) -> tuple[str, str]:
+        if isinstance(exc, (SchemaValidationError, InvalidSchemaPathError, SchemaError)):
+            return ("validation_error", type(exc).__name__)
+        if hasattr(exc, "code") and callable(exc.code):
+            try:
+                code_obj = exc.code()
+                code_name = getattr(code_obj, "name", str(code_obj))
+            except Exception:
+                code_name = type(exc).__name__
+            if code_name == "DEADLINE_EXCEEDED":
+                return ("timeout_error", code_name)
+            if code_name in ("UNAUTHENTICATED", "PERMISSION_DENIED"):
+                return ("auth_tls_error", code_name)
+            if code_name == "UNAVAILABLE":
+                return ("transport_error", code_name)
+            return ("grpc_status", str(code_name))
+        if isinstance(exc, TimeoutError):
+            return ("timeout_error", "TimeoutError")
+        return ("transport_error", type(exc).__name__)
+
+    @staticmethod
+    def _proto_byte_size(msg: Any) -> int:
+        if msg is None:
+            return 0
+        byte_size_fn = getattr(msg, "ByteSize", None)
+        if callable(byte_size_fn):
+            try:
+                return int(byte_size_fn())
+            except Exception:
+                return 0
+        return 0
+
     def execute_capabilities(self, operation: CapabilitiesOperation) -> gnmi_pb2.CapabilityResponse:
         """Executes Capabilities RPC adhering to CapabilitiesOperation."""
+        self._last_rpc_metrics = None
         res = self.capability()
         if self.schema_config and self.schema_config.auto_discovery and hasattr(res, 'supported_models') and res.supported_models:
             try:
@@ -142,6 +185,7 @@ class GNMIClient(BaseClient):
 
     def execute_get(self, operation: GetOperation) -> gnmi_pb2.GetResponse:
         """Executes Get RPC adhering to GetOperation."""
+        self._last_rpc_metrics = None
         paths = []
         prefix = ""
         if isinstance(operation.selector, PathSelector):
@@ -162,6 +206,7 @@ class GNMIClient(BaseClient):
 
     def execute_set(self, operation: SetOperation) -> gnmi_pb2.SetResponse:
         """Executes Set RPC adhering to SetOperation and atomic Change models."""
+        self._last_rpc_metrics = None
         enc = self.encoding
         if isinstance(operation.protocol_options, GNMIOptions):
             if operation.protocol_options.encoding:
@@ -398,11 +443,23 @@ class GNMIClient(BaseClient):
                         cancel_func()
                     break
 
+                is_sync = bool(getattr(response, 'sync_response', False))
+                upd_msg = getattr(response, 'update', None)
+                has_updates = bool(upd_msg is not None and len(getattr(upd_msg, 'update', ())) > 0)
+                has_deletes = bool(upd_msg is not None and len(getattr(upd_msg, 'delete', ())) > 0)
+                if is_sync and not has_updates and not has_deletes:
+                    ev_kind = "sync_response"
+                elif has_deletes and not has_updates:
+                    ev_kind = "delete"
+                else:
+                    ev_kind = "update"
+
                 yield StreamEvent(
                     protocol="gnmi",
                     timestamp=time.time(),
                     raw_payload=response,
-                    is_sync_marker=getattr(response, 'sync_response', False),
+                    is_sync_marker=is_sync,
+                    event_kind=ev_kind,
                 )
         except grpc.RpcError as e:
             if context.is_cancelled:
@@ -412,6 +469,7 @@ class GNMIClient(BaseClient):
                 timestamp=time.time(),
                 raw_payload=None,
                 error=e,
+                event_kind="error",
             )
         except Exception as e:
             if context.is_cancelled:
@@ -421,6 +479,7 @@ class GNMIClient(BaseClient):
                 timestamp=time.time(),
                 raw_payload=None,
                 error=e,
+                event_kind="error",
             )
 
     # =========================================================================
@@ -430,7 +489,27 @@ class GNMIClient(BaseClient):
     def capability(self, **kwargs) -> gnmi_pb2.CapabilityResponse:
         """ Executes an Unary Capabilities RPC """
         request = gnmi_pb2.CapabilityRequest()
-        response = self.stub.Capabilities(request, metadata=self.metadata)
+        req_bytes = self._proto_byte_size(request)
+        t0 = time.perf_counter()
+        try:
+            response = self.stub.Capabilities(request, metadata=self.metadata)
+        except Exception as exc:
+            err_cat, err_code = self._classify_error(exc)
+            self._last_rpc_metrics = {
+                "wire_rpc_ms": (time.perf_counter() - t0) * 1000.0,
+                "request_bytes": req_bytes,
+                "response_bytes": 0,
+                "path_count": 0,
+                "error_category": err_cat,
+                "error_code": err_code,
+            }
+            raise
+        self._last_rpc_metrics = {
+            "wire_rpc_ms": (time.perf_counter() - t0) * 1000.0,
+            "request_bytes": req_bytes,
+            "response_bytes": self._proto_byte_size(response),
+            "path_count": 0,
+        }
         return response
 
     def get(self, **kwargs) -> gnmi_pb2.GetResponse:
@@ -461,7 +540,28 @@ class GNMIClient(BaseClient):
             path_elem = request.path.add()
             path_elem.CopyFrom(parse_path(p))
 
-        response = self.stub.Get(request, metadata=self.metadata)
+        req_bytes = self._proto_byte_size(request)
+        path_cnt = len(paths)
+        t0 = time.perf_counter()
+        try:
+            response = self.stub.Get(request, metadata=self.metadata)
+        except Exception as exc:
+            err_cat, err_code = self._classify_error(exc)
+            self._last_rpc_metrics = {
+                "wire_rpc_ms": (time.perf_counter() - t0) * 1000.0,
+                "request_bytes": req_bytes,
+                "response_bytes": 0,
+                "path_count": path_cnt,
+                "error_category": err_cat,
+                "error_code": err_code,
+            }
+            raise
+        self._last_rpc_metrics = {
+            "wire_rpc_ms": (time.perf_counter() - t0) * 1000.0,
+            "request_bytes": req_bytes,
+            "response_bytes": self._proto_byte_size(response),
+            "path_count": path_cnt,
+        }
         return response
 
     def _build_typed_val(self, val: Any, encoding: str = "json_ietf", val_type: Any = None) -> gnmi_pb2.TypedValue:
@@ -659,7 +759,28 @@ class GNMIClient(BaseClient):
             upd_obj.path.CopyFrom(parse_path(p))
             upd_obj.val.CopyFrom(self._build_typed_val(v, encoding=enc, val_type=val_type))
 
-        response = self.stub.Set(request, metadata=self.metadata)
+        req_bytes = self._proto_byte_size(request)
+        path_cnt = len(request.delete) + len(request.replace) + len(request.update)
+        t0 = time.perf_counter()
+        try:
+            response = self.stub.Set(request, metadata=self.metadata)
+        except Exception as exc:
+            err_cat, err_code = self._classify_error(exc)
+            self._last_rpc_metrics = {
+                "wire_rpc_ms": (time.perf_counter() - t0) * 1000.0,
+                "request_bytes": req_bytes,
+                "response_bytes": 0,
+                "path_count": path_cnt,
+                "error_category": err_cat,
+                "error_code": err_code,
+            }
+            raise
+        self._last_rpc_metrics = {
+            "wire_rpc_ms": (time.perf_counter() - t0) * 1000.0,
+            "request_bytes": req_bytes,
+            "response_bytes": self._proto_byte_size(response),
+            "path_count": path_cnt,
+        }
         return response
 
     def _build_subscribe_request(self, config: dict) -> gnmi_pb2.SubscribeRequest:

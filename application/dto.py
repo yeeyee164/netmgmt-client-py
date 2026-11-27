@@ -7,7 +7,7 @@ Zero dependencies on transport libraries (grpc, ncclient) or CLI parsers (argpar
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 import time
 
 from application.exceptions import UnsupportedProtocolError, InvalidRequestError
@@ -466,6 +466,154 @@ class StepResultDTO:
     error_code: Optional[str] = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class LatencySummaryDTO:
+    """Aggregated latency distribution summary in milliseconds."""
+
+    count: int = 0
+    min_ms: float = 0.0
+    avg_ms: float = 0.0
+    p50_ms: float = 0.0
+    p95_ms: float = 0.0
+    p99_ms: float = 0.0
+    max_ms: float = 0.0
+
+
+@dataclass(frozen=True, kw_only=True)
+class ExecutionStepStatsDTO:
+    """Per-step telemetry captured for a single RPC step within an execution."""
+
+    step_index: int
+    op_type: str
+    success: bool
+    aborted: bool = False
+    duration_ms: float = 0.0
+    wire_rpc_ms: Optional[float] = None
+    request_bytes: int = 0
+    response_bytes: int = 0
+    path_count: int = 0
+    error_category: Optional[str] = None
+    error_code: Optional[str] = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class ExecutionStatsDTO:
+    """Per-execution summary attached to ExecutionResultDTO and printed by CLI."""
+
+    protocol: str
+    target: str
+    request_id: Optional[str] = None
+    total_duration_ms: float = 0.0
+    connect_duration_ms: float = 0.0
+    connection_reused: bool = False
+    validation_duration_ms: float = 0.0
+    validation_passed: Optional[bool] = None
+    operations_total: int = 0
+    operations_succeeded: int = 0
+    operations_failed: int = 0
+    operations_aborted: int = 0
+    request_payload_bytes: int = 0
+    response_payload_bytes: int = 0
+    rollbacks: Dict[str, int] = field(default_factory=dict)
+    steps: List[ExecutionStepStatsDTO] = field(default_factory=list)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SubscriptionStatsDTO:
+    """Per-subscription runtime or final statistics snapshot."""
+
+    subscription_id: str
+    protocol: str
+    delivery_mode: str
+    target: str
+    owner_id: Optional[str] = None
+    active: bool = True
+    uptime_seconds: float = 0.0
+    events_by_kind: Dict[str, int] = field(default_factory=dict)
+    events_total: int = 0
+    event_rate_eps: float = 0.0
+    time_to_first_event_ms: Optional[float] = None
+    time_to_sync_ms: Optional[float] = None
+    queue_depth_current: int = 0
+    queue_depth_peak: int = 0
+    events_dropped: Dict[str, int] = field(default_factory=dict)
+    poll_triggers_total: int = 0
+    disconnect_reason: Optional[str] = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class OperationStatsSummaryDTO:
+    """Aggregate RPC and pipeline execution statistics across targets/protocols."""
+
+    total: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    aborted: int = 0
+    by_protocol: Dict[str, int] = field(default_factory=dict)
+    by_target: Dict[str, int] = field(default_factory=dict)
+    by_op_type: Dict[str, int] = field(default_factory=dict)
+    errors_by_category: Dict[str, int] = field(default_factory=dict)
+    netconf_rollbacks: Dict[str, int] = field(default_factory=dict)
+    request_bytes_total: int = 0
+    response_bytes_total: int = 0
+    execution_latency: LatencySummaryDTO = field(default_factory=LatencySummaryDTO)
+    connect_latency: LatencySummaryDTO = field(default_factory=LatencySummaryDTO)
+    wire_rpc_latency: LatencySummaryDTO = field(default_factory=LatencySummaryDTO)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SessionStatsSummaryDTO:
+    """Aggregate stateful logical session and datastore lock statistics."""
+
+    active: int = 0
+    active_by_protocol: Dict[str, int] = field(default_factory=dict)
+    created_total: int = 0
+    closed_by_reason: Dict[str, int] = field(default_factory=dict)
+    operations_per_session_avg: float = 0.0
+    datastore_locks_active: int = 0
+    datastore_lock_hold_ms: LatencySummaryDTO = field(default_factory=LatencySummaryDTO)
+    idle_evictions_total: int = 0
+    orphaned_lock_reclaims_total: int = 0
+    reconnects_total: int = 0
+
+
+@dataclass(frozen=True, kw_only=True)
+class SchemaStatsSummaryDTO:
+    """Aggregate YANG schema cache and pre-flight validation statistics."""
+
+    validations_passed: int = 0
+    validations_failed: int = 0
+    validation_latency: LatencySummaryDTO = field(default_factory=LatencySummaryDTO)
+    cache_hits: Dict[str, int] = field(default_factory=dict)
+    cache_misses: Dict[str, int] = field(default_factory=dict)
+    cache_hit_ratio: float = 0.0
+    profiles_loaded: int = 0
+    compile_latency: LatencySummaryDTO = field(default_factory=LatencySummaryDTO)
+
+
+@dataclass(frozen=True, kw_only=True)
+class RuntimeHealthStatsDTO:
+    """Backend concurrency, queue saturation, and WebSocket health metrics."""
+
+    process_uptime_seconds: float = 0.0
+    worker_threads_active: Dict[str, int] = field(default_factory=dict)
+    worker_semaphore_wait: LatencySummaryDTO = field(default_factory=LatencySummaryDTO)
+    websocket_clients_active: Dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, kw_only=True)
+class StatsSnapshotDTO:
+    """Complete read-only runtime statistics snapshot across all five domains."""
+
+    generated_at_epoch: float
+    operations: OperationStatsSummaryDTO
+    subscriptions_active: int
+    subscriptions: List[SubscriptionStatsDTO]
+    sessions: SessionStatsSummaryDTO
+    schemas: SchemaStatsSummaryDTO
+    runtime: RuntimeHealthStatsDTO
+
+
 @dataclass(kw_only=True)
 class ExecutionResultDTO:
     """
@@ -481,6 +629,7 @@ class ExecutionResultDTO:
         error_summary: Consolidated error message if any step failed.
         error_code: Standardized error code string for top-level failure triage.
         execution_time_ms: Total execution duration in milliseconds.
+        stats: Optional per-execution statistics summary.
     """
     target: str
     protocol: str
@@ -489,6 +638,7 @@ class ExecutionResultDTO:
     error_summary: Optional[str] = None
     error_code: Optional[str] = None
     execution_time_ms: float = 0.0
+    stats: Optional[ExecutionStatsDTO] = None
 
 
 @dataclass(kw_only=True)

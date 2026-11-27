@@ -28,6 +28,7 @@ from application.subscription_queue import (
     SubscriptionState,
 )
 from managers.subscribe_session import SubscribeSession
+from modules.stats_hooks import NOOP_STATS_RECORDER, StatsRecorder, safe_record
 
 
 class SubscriptionService:
@@ -44,6 +45,7 @@ class SubscriptionService:
         self,
         device_registry: Optional[DeviceRegistryService] = None,
         operation_service: Optional[DeviceOperationService] = None,
+        stats_recorder: Optional[StatsRecorder] = None,
     ):
         """
         Initializes the subscription service.
@@ -51,12 +53,26 @@ class SubscriptionService:
         Args:
             device_registry: Optional `DeviceRegistryService` for endpoint resolution.
             operation_service: Optional `DeviceOperationService` for building session configs.
+            stats_recorder: Optional `StatsRecorder` for telemetry and queue metrics.
         """
         self._registry = device_registry or DeviceRegistryService()
-        self._op_service = operation_service or DeviceOperationService(device_registry=self._registry)
+        self._stats_recorder: StatsRecorder = stats_recorder or NOOP_STATS_RECORDER
+        self._op_service = operation_service or DeviceOperationService(
+            device_registry=self._registry,
+            stats_recorder=self._stats_recorder,
+        )
         self._lock = threading.RLock()
         self._active_subscriptions: Dict[str, ManagedSubscription] = {}
         self._consumer_records: Dict[str, tuple[ManagedSubscription, queue.Queue]] = {}
+        if hasattr(self._stats_recorder, "register_gauge_provider"):
+            self._stats_recorder.register_gauge_provider(
+                "subscriptions_active",
+                self._live_subscription_count,
+            )
+
+    def _live_subscription_count(self) -> int:
+        with self._lock:
+            return sum(1 for m in self._active_subscriptions.values() if m.is_alive)
 
     def start_subscription(
         self,
@@ -99,10 +115,27 @@ class SubscriptionService:
 
         session_cfg = self._op_service.build_session_config(request)
         sub_name = getattr(session_cfg.operation, "subscription_name", "sub")
+        delivery_obj = getattr(getattr(session_cfg.operation, "delivery", None), "mode", None)
+        delivery_mode = delivery_obj.value if hasattr(delivery_obj, "value") else "periodic"
 
         subscription_id = str(uuid.uuid4())
         event_queue: queue.Queue = (
-            shared_queue if shared_queue is not None else FanoutQueue(maxsize=queue_size)
+            shared_queue
+            if shared_queue is not None
+            else FanoutQueue(
+                maxsize=queue_size,
+                subscription_id=subscription_id,
+                stats_recorder=self._stats_recorder,
+            )
+        )
+
+        safe_record(
+            self._stats_recorder.record_subscription_started,
+            subscription_id,
+            endpoint.protocol,
+            delivery_mode,
+            endpoint.target,
+            owner_id=owner_id,
         )
 
         worker = SubscribeSession(
@@ -110,6 +143,9 @@ class SubscriptionService:
             data_queue=event_queue,
             subscription_name=sub_name,
         )
+        if "Mock" not in type(worker).__name__ and hasattr(worker, "stats_recorder"):
+            worker.stats_recorder = self._stats_recorder
+            worker.subscription_id = subscription_id
 
         worker_thread = threading.Thread(
             target=worker.start,

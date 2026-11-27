@@ -5,6 +5,7 @@ FastAPI application factory, lifespan management, health probes, and router wiri
 
 from contextlib import asynccontextmanager
 from typing import Optional
+import uuid
 
 import anyio
 from fastapi import FastAPI, Request, status
@@ -18,6 +19,7 @@ from api.routes import (
     operations_router,
     schemas_router,
     sessions_router,
+    stats_router,
     subscriptions_router,
 )
 from api.schemas.common import HealthResponseSchema, ReadinessResponseSchema
@@ -28,6 +30,7 @@ _SERVICE_KEYS = (
     "session_manager",
     "operation_service",
     "subscription_service",
+    "stats_service",
 )
 
 
@@ -86,6 +89,15 @@ def create_app(settings: Optional[APISettings] = None) -> FastAPI:
 
     register_exception_handlers(application)
 
+    @application.middleware("http")
+    async def attach_request_id(request: Request, call_next):
+        rid = request.headers.get("x-request-id")
+        request_id = rid.strip() if rid and rid.strip() else str(uuid.uuid4())
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
     @application.get("/healthz", response_model=HealthResponseSchema, tags=["Health"])
     async def liveness() -> HealthResponseSchema:
         """Liveness probe endpoint."""
@@ -118,6 +130,7 @@ def create_app(settings: Optional[APISettings] = None) -> FastAPI:
     application.include_router(sessions_router)
     application.include_router(subscriptions_router)
     application.include_router(schemas_router)
+    application.include_router(stats_router)
 
     return application
 

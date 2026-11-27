@@ -4,6 +4,7 @@ FastAPI HTTP and WebSocket routes for telemetry subscriptions.
 """
 
 from functools import partial
+from typing import Optional
 
 import anyio
 from fastapi import APIRouter, Depends, Response, WebSocket, WebSocketDisconnect, status
@@ -11,6 +12,7 @@ from fastapi import APIRouter, Depends, Response, WebSocket, WebSocketDisconnect
 from application.devices import DeviceRegistryService
 from application.dto import validate_protocol_operation
 from application.exceptions import PermissionDeniedError, SubscriptionNotFoundError
+from application.stats import StatsCollector
 from application.subscriptions import SubscriptionService
 from api.adapters import (
     to_execution_request_dto,
@@ -25,7 +27,9 @@ from api.deps import (
     get_current_principal,
     get_device_registry,
     get_rpc_limiter,
+    get_stats_collector,
     get_subscription_service,
+    run_sync_with_stats,
 )
 from api.exceptions import APIAuthenticationError
 from api.schemas.subscriptions import (
@@ -50,6 +54,7 @@ async def create_subscription(
     registry: DeviceRegistryService = Depends(get_device_registry),
     subscription_service: SubscriptionService = Depends(get_subscription_service),
     limiter: anyio.CapacityLimiter = Depends(get_rpc_limiter),
+    stats_collector: Optional[StatsCollector] = Depends(get_stats_collector),
 ) -> SubscriptionCreateResponseSchema:
     """Starts a background telemetry subscription owned by the authenticated caller."""
     request_dto = to_execution_request_dto(payload, settings=settings)
@@ -57,7 +62,7 @@ async def create_subscription(
     for step in request_dto.operations:
         validate_protocol_operation(endpoint.protocol, step.op_type)
 
-    sub_id = await anyio.to_thread.run_sync(
+    sub_id = await run_sync_with_stats(
         partial(
             subscription_service.start_subscription,
             request_dto,
@@ -65,6 +70,8 @@ async def create_subscription(
             owner_id=principal.owner_id,
         ),
         limiter=limiter,
+        stats_collector=stats_collector,
+        worker_type="subscribe",
     )
     info = subscription_service.get_subscription_info(
         sub_id, owner_id=principal.owner_id
@@ -171,6 +178,9 @@ async def stream_subscription_websocket(
     underlying `SubscriptionService` stream.
     """
     subscription_service: SubscriptionService = websocket.app.state.subscription_service
+    stats_collector: Optional[StatsCollector] = getattr(
+        websocket.app.state, "stats_collector", None
+    )
 
     try:
         principal = authenticate_websocket(websocket)
@@ -185,6 +195,8 @@ async def stream_subscription_websocket(
         return
 
     await websocket.accept()
+    if stats_collector is not None:
+        stats_collector.websocket_connected("subscriptions")
 
     async def _watch_client_disconnect(task_group: anyio.abc.TaskGroup) -> None:
         try:
@@ -257,4 +269,6 @@ async def stream_subscription_websocket(
             tg.start_soon(_watch_client_disconnect, tg)
             tg.start_soon(_forward_subscription_events, tg)
     finally:
+        if stats_collector is not None:
+            stats_collector.websocket_disconnected("subscriptions")
         subscription_service.close_consumer(consumer_id)

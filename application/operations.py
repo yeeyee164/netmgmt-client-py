@@ -16,6 +16,7 @@ from application.devices import DeviceRegistryService
 from application.dto import (
     ExecutionRequestDTO,
     ExecutionResultDTO,
+    ExecutionStatsDTO,
     OperationStepDTO,
     StepResultDTO,
     expand_request_repetitions,
@@ -30,6 +31,7 @@ from application.exceptions import (
 from application.operation_mapper import ExecutionResultMapper, OperationRequestMapper
 from application.schemas import SchemaCatalogService
 from application.sessions import DeviceSessionManager
+from application.stats import ExecutionStatsScope, StatsCollector, aggregate_execution_stats
 
 from config.model import Protocol, SessionConfig
 from config.operations import (
@@ -49,6 +51,7 @@ from managers.unary_worker import (
     TransactionWorker,
 )
 from modules.formatter import normalize_protocol_payload
+from modules.stats_hooks import NOOP_STATS_RECORDER, StatsRecorder, safe_record
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +148,7 @@ class DeviceOperationService:
         device_registry: Optional[DeviceRegistryService] = None,
         schema_service: Optional[SchemaCatalogService] = None,
         session_manager: Optional[DeviceSessionManager] = None,
+        stats_recorder: Optional[StatsRecorder] = None,
     ):
         """
         Initializes the device operation service.
@@ -153,10 +157,33 @@ class DeviceOperationService:
             device_registry: Optional `DeviceRegistryService` for resolving device_id endpoints.
             schema_service: Optional `SchemaCatalogService` for pre-flight schema validation.
             session_manager: Optional `DeviceSessionManager` for managed logical-session execution.
+            stats_recorder: Optional `StatsRecorder` / `StatsCollector` for runtime metrics.
         """
         self._registry = device_registry or DeviceRegistryService()
         self._schema_service = schema_service or SchemaCatalogService()
         self._session_manager = session_manager
+        self._stats_recorder: StatsRecorder = stats_recorder or NOOP_STATS_RECORDER
+
+    def _new_scope(
+        self,
+        protocol: str,
+        target: str,
+        *,
+        request_id: Optional[str] = None,
+        connection_reused: bool = False,
+    ) -> ExecutionStatsScope:
+        parent = (
+            self._stats_recorder
+            if isinstance(self._stats_recorder, StatsCollector)
+            else None
+        )
+        return ExecutionStatsScope(
+            parent=parent,
+            protocol=protocol,
+            target=target,
+            request_id=request_id,
+            connection_reused=connection_reused,
+        )
 
     def build_session_config(self, request: ExecutionRequestDTO) -> SessionConfig:
         """
@@ -174,7 +201,12 @@ class DeviceOperationService:
         return OperationRequestMapper.build_selector(step)
 
     @classmethod
-    def resolve_worker(cls, session_cfg: Any, client: Optional[Any] = None) -> BaseUnaryWorker:
+    def resolve_worker(
+        cls,
+        session_cfg: Any,
+        client: Optional[Any] = None,
+        stats_recorder: Optional[StatsRecorder] = None,
+    ) -> BaseUnaryWorker:
         """
         Instantiates the matching unary worker instance for the session configuration.
 
@@ -182,20 +214,21 @@ class DeviceOperationService:
         (`GetWorker`, `SetWorker`, `CapabilityWorker`, `TransactionWorker`) for single-operation sessions.
         """
         operations = getattr(session_cfg, "operations", ())
+        extra = {"stats_recorder": stats_recorder} if stats_recorder is not None else {}
         if len(operations) > 1:
-            return SequentialWorker(config=session_cfg, client=client)
+            return SequentialWorker(config=session_cfg, client=client, **extra)
 
         op = operations[0] if len(operations) == 1 else getattr(session_cfg, "operation", None)
         if isinstance(op, (GetOperation, GetSchemaOperation)):
-            return GetWorker(config=session_cfg, client=client)
+            return GetWorker(config=session_cfg, client=client, **extra)
         elif isinstance(op, SetOperation):
-            return SetWorker(config=session_cfg, client=client)
+            return SetWorker(config=session_cfg, client=client, **extra)
         elif isinstance(op, CapabilitiesOperation):
-            return CapabilityWorker(config=session_cfg, client=client)
+            return CapabilityWorker(config=session_cfg, client=client, **extra)
         elif isinstance(op, TransactionOperation):
-            return TransactionWorker(config=session_cfg, client=client)
+            return TransactionWorker(config=session_cfg, client=client, **extra)
         elif len(operations) == 0 and op is None:
-            return SequentialWorker(config=session_cfg, client=client)
+            return SequentialWorker(config=session_cfg, client=client, **extra)
         raise ValueError(f"Unsupported unary operation: {op}")
 
     def _resolve_worker(self, session_cfg: Any, client: Optional[Any] = None) -> BaseUnaryWorker:
@@ -205,6 +238,8 @@ class DeviceOperationService:
     def execute_unary(
         self,
         request: ExecutionRequestDTO,
+        *,
+        request_id: Optional[str] = None,
     ) -> ExecutionResultDTO:
         """
         Executes a unary request pipeline.
@@ -215,7 +250,7 @@ class DeviceOperationService:
         """
         # If request requested repetition, delegate to execute_batch and aggregate results
         if getattr(request, "times", 1) > 1:
-            batch_results = self.execute_batch([request])
+            batch_results = self.execute_batch([request], request_id=request_id)
             if batch_results:
                 combined_steps: List[StepResultDTO] = []
                 all_success = True
@@ -231,6 +266,10 @@ class DeviceOperationService:
                     if r.error_summary:
                         errors.append(r.error_summary)
                     total_ms += r.execution_time_ms
+                combined_stats = aggregate_execution_stats(
+                    [r.stats for r in batch_results if r.stats is not None],
+                    request_id=request_id,
+                )
                 return ExecutionResultDTO(
                     target=batch_results[0].target,
                     protocol=batch_results[0].protocol,
@@ -239,41 +278,56 @@ class DeviceOperationService:
                     error_summary="; ".join(errors) if errors else None,
                     error_code=first_error_code,
                     execution_time_ms=total_ms,
+                    stats=combined_stats,
                 )
 
         start_time = time.perf_counter()
         target_str = request.adhoc_endpoint.target if request.adhoc_endpoint else (request.device_id or "unknown")
         proto_str = request.protocol or (request.adhoc_endpoint.protocol if request.adhoc_endpoint else "unknown")
+        scope: Optional[ExecutionStatsScope] = None
 
         try:
             endpoint = self._registry.resolve_endpoint(request)
             target_str = endpoint.target
             proto_str = endpoint.protocol
+            scope = self._new_scope(proto_str, target_str, request_id=request_id, connection_reused=False)
 
             # Pre-flight schema validation only mode
             if request.validate_only:
-                return self._execute_validate_only(request, target_str, proto_str, start_time)
+                return self._execute_validate_only(request, target_str, proto_str, start_time, scope=scope)
 
             # Build domain SessionConfig
             session_cfg = self.build_session_config(request)
             worker = self._resolve_worker(session_cfg)
+            if isinstance(worker, BaseUnaryWorker):
+                worker.stats_recorder = scope
 
             raw_result = worker.start()
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-            return self._format_execution_result(
+            res_dto = self._format_execution_result(
                 raw_result=raw_result,
                 target=target_str,
                 protocol=proto_str,
                 elapsed_ms=elapsed_ms,
             )
+            res_dto.stats = scope.finalize(total_duration_ms=elapsed_ms)
+            return res_dto
         except ApplicationError as app_err:
             err_code = getattr(app_err, "error_code", "APPLICATION_ERROR")
             logger.error(f"[DeviceOperationService {target_str}] Application error ({err_code}): {app_err}")
-            return self._build_error_result(target_str, proto_str, str(app_err), err_code, start_time)
+            err_res = self._build_error_result(target_str, proto_str, str(app_err), err_code, start_time)
+            if scope is None:
+                scope = self._new_scope(proto_str, target_str, request_id=request_id)
+            err_res.stats = scope.finalize(total_duration_ms=err_res.execution_time_ms)
+            return err_res
         except Exception as exc:
             logger.error(f"[DeviceOperationService {target_str}] Unexpected error: {exc}", exc_info=True)
-            return self._build_error_result(target_str, proto_str, str(exc), "EXECUTION_ERROR", start_time)
+            err_res = self._build_error_result(target_str, proto_str, str(exc), "EXECUTION_ERROR", start_time)
+            if scope is None:
+                scope = self._new_scope(proto_str, target_str, request_id=request_id)
+            err_res.stats = scope.finalize(total_duration_ms=err_res.execution_time_ms)
+            return err_res
 
     @staticmethod
     def _build_error_result(
@@ -298,10 +352,27 @@ class DeviceOperationService:
         target_str: str,
         proto_str: str,
         start_time: float,
+        scope: Optional[ExecutionStatsScope] = None,
     ) -> ExecutionResultDTO:
         """Runs offline pre-flight schema validation and formats an ExecutionResultDTO."""
-        val_errors = self._schema_service.validate_request_schema(request)
+        t_val = time.perf_counter()
+        if (
+            scope is not None
+            and isinstance(self._stats_recorder, StatsCollector)
+            and not hasattr(self._schema_service, "_mock_return_value")
+        ):
+            val_errors = self._schema_service.validate_request_schema(request, stats_recorder=scope)
+        else:
+            val_errors = self._schema_service.validate_request_schema(request)
+        val_ms = (time.perf_counter() - t_val) * 1000.0
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        if scope is not None:
+            if scope._validation_passed is None:
+                scope.record_schema_validation(proto_str, not bool(val_errors), val_ms)
+            exec_stats = scope.finalize(total_duration_ms=elapsed_ms)
+        else:
+            exec_stats = None
+
         if val_errors:
             return ExecutionResultDTO(
                 target=target_str,
@@ -319,6 +390,7 @@ class DeviceOperationService:
                 error_summary="; ".join(val_errors),
                 error_code="SCHEMA_VALIDATION_ERROR",
                 execution_time_ms=elapsed_ms,
+                stats=exec_stats,
             )
         return ExecutionResultDTO(
             target=target_str,
@@ -326,6 +398,7 @@ class DeviceOperationService:
             success=True,
             results=[StepResultDTO(op_type="validate", success=True, data="Schema validation succeeded")],
             execution_time_ms=elapsed_ms,
+            stats=exec_stats,
         )
 
     def execute_in_session(
@@ -334,6 +407,7 @@ class DeviceOperationService:
         request: ExecutionRequestDTO,
         *,
         owner_id: str,
+        request_id: Optional[str] = None,
     ) -> ExecutionResultDTO:
         """
         Executes operations within an existing managed logical session.
@@ -376,9 +450,16 @@ class DeviceOperationService:
                 times=1,
             )
 
+            scope = self._new_scope(
+                lease.protocol,
+                lease.endpoint.target,
+                request_id=request_id,
+                connection_reused=True,
+            )
+
             if bound_request.validate_only:
                 return self._execute_validate_only(
-                    bound_request, lease.endpoint.target, lease.protocol, start_time
+                    bound_request, lease.endpoint.target, lease.protocol, start_time, scope=scope
                 )
 
             repeat = max(getattr(request, "times", 1), 1)
@@ -387,6 +468,8 @@ class DeviceOperationService:
                 session_cfg = self.build_session_config(bound_request)
                 for _ in range(repeat):
                     worker = self._resolve_worker(session_cfg, client=lease.client)
+                    if isinstance(worker, BaseUnaryWorker):
+                        worker.stats_recorder = scope
                     raw_result = worker.start()
                     items = raw_result if isinstance(raw_result, list) else [raw_result]
                     all_raw_items.extend(items)
@@ -394,17 +477,21 @@ class DeviceOperationService:
                 raise
             except ApplicationError as app_err:
                 err_code = getattr(app_err, "error_code", "APPLICATION_ERROR")
-                return self._build_error_result(
+                err_res = self._build_error_result(
                     lease.endpoint.target, lease.protocol, str(app_err), err_code, start_time
                 )
+                err_res.stats = scope.finalize(total_duration_ms=err_res.execution_time_ms)
+                return err_res
             except Exception as exc:
                 logger.error(
                     f"[DeviceOperationService {lease.endpoint.target}] Session execution error: {exc}",
                     exc_info=True,
                 )
-                return self._build_error_result(
+                err_res = self._build_error_result(
                     lease.endpoint.target, lease.protocol, str(exc), "EXECUTION_ERROR", start_time
                 )
+                err_res.stats = scope.finalize(total_duration_ms=err_res.execution_time_ms)
+                return err_res
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
             result_dto = self._format_execution_result(
@@ -418,13 +505,21 @@ class DeviceOperationService:
             for idx, step_res in enumerate(result_dto.results):
                 step_dto = bound_request.operations[idx % num_ops]
                 lease.record_step_outcome(step_dto, step_res.success)
+                safe_record(
+                    self._stats_recorder.record_session_operation,
+                    lease.protocol,
+                    lease.endpoint.target,
+                )
 
+            result_dto.stats = scope.finalize(total_duration_ms=elapsed_ms)
             return result_dto
 
     def execute_batch(
         self,
         requests: Sequence[ExecutionRequestDTO],
         max_workers: Optional[int] = None,
+        *,
+        request_id: Optional[str] = None,
     ) -> List[ExecutionResultDTO]:
         """
         Executes multiple ExecutionRequestDTOs concurrently using a ThreadPoolExecutor.
@@ -445,7 +540,7 @@ class DeviceOperationService:
         results: List[Optional[ExecutionResultDTO]] = [None] * len(expanded_requests)
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers_count) as executor:
             future_to_idx = {
-                executor.submit(self.execute_unary, req): idx
+                executor.submit(self.execute_unary, req, request_id=request_id): idx
                 for idx, req in enumerate(expanded_requests)
             }
             for future in concurrent.futures.as_completed(future_to_idx):

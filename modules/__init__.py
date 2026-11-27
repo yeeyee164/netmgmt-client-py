@@ -18,6 +18,7 @@ from modules.path import (
     to_path_elems,
 )
 from modules.security import SecurityModule, SecurityProfile
+from modules.stats_hooks import NOOP_STATS_RECORDER, NoOpStatsRecorder, StatsRecorder
 
 __all__ = [
     "OutputHandler",
@@ -27,6 +28,9 @@ __all__ = [
     "normalize_protocol_payload",
     "SecurityModule",
     "SecurityProfile",
+    "StatsRecorder",
+    "NoOpStatsRecorder",
+    "NOOP_STATS_RECORDER",
     "setup_logger",
     "parse_path",
     "create_prefix",

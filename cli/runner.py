@@ -16,10 +16,13 @@ from application.dto import (
     ExecutionRequestDTO,
     ExecutionResultDTO,
     StepResultDTO,
+    SubscriptionStatsDTO,
     expand_request_repetitions,
 )
 from application.operations import DeviceOperationService
+from application.stats import StatsCollector, StatsService
 from application.subscriptions import SubscriptionService
+from cli.stats_formatter import write_cli_stats
 from modules.output import OutputHandler
 
 logger = logging.getLogger(__name__)
@@ -36,12 +39,16 @@ class CLIStreamRunner:
         self,
         subscription_service: Optional[SubscriptionService] = None,
         device_registry: Optional[DeviceRegistryService] = None,
+        stats_collector: Optional[StatsCollector] = None,
     ):
+        self.stats_collector = stats_collector
         self.subscription_service = subscription_service or SubscriptionService(
-            device_registry=device_registry
+            device_registry=device_registry,
+            stats_recorder=stats_collector,
         )
         self.data_queue: queue.Queue = queue.Queue(maxsize=1000)
         self.stream_errors: List[dict] = []
+        self.last_subscription_stats: List[SubscriptionStatsDTO] = []
 
     def run(
         self,
@@ -53,6 +60,7 @@ class CLIStreamRunner:
         or KeyboardInterrupt, routing received telemetry events to output_handlers.
         """
         self.stream_errors = []
+        self.last_subscription_stats = []
         expanded_requests = expand_request_repetitions(requests)
 
         if not expanded_requests:
@@ -103,6 +111,15 @@ class CLIStreamRunner:
             logger.info("\n[CLIStreamRunner] Ctrl+C Detected! Initiating graceful shutdown...")
         finally:
             self.subscription_service.stop_all()
+            if self.stats_collector is not None:
+                stats_svc = StatsService(self.stats_collector)
+                for sid in sub_ids:
+                    try:
+                        self.last_subscription_stats.append(
+                            stats_svc.get_subscription_stats(sid, is_admin=True)
+                        )
+                    except Exception:
+                        pass
             logger.info("[CLIStreamRunner] All streaming sessions cleanly terminated. Goodbye!")
 
         return sub_ids
@@ -212,23 +229,38 @@ class CLIApplicationRunner:
             requests = [session_to_execution_request(s) for s in cfg.sessions]
 
         device_registry: Optional[DeviceRegistryService] = getattr(cfg, "device_registry", None)
+        stats_enabled = bool(getattr(cfg, "stats", False))
+        stats_format = str(getattr(cfg, "stats_format", "table") or "table")
+        stats_file = getattr(cfg, "stats_file", None)
+        collector = StatsCollector() if (stats_enabled or stats_file) else None
 
         unary_requests = [r for r in requests if CLIApplicationRunner.is_unary_request(r)]
         stream_requests = [r for r in requests if CLIApplicationRunner.is_stream_request(r)]
 
         results: List[ExecutionResultDTO] = []
+        collected_stats: List[Any] = []
         try:
             if unary_requests:
-                op_service = DeviceOperationService(device_registry=device_registry)
+                op_service = DeviceOperationService(
+                    device_registry=device_registry,
+                    stats_recorder=collector,
+                )
                 batch_results = op_service.execute_batch(requests=unary_requests)
                 CLIApplicationRunner.write_results(batch_results, handlers)
                 results.extend(batch_results)
+                if collector is not None:
+                    collected_stats.extend(r.stats for r in batch_results if r.stats is not None)
             if stream_requests:
-                stream_runner = CLIStreamRunner(device_registry=device_registry)
+                stream_runner = CLIStreamRunner(
+                    device_registry=device_registry,
+                    stats_collector=collector,
+                )
                 stream_runner.run(
                     requests=stream_requests,
                     output_handlers=handlers,
                 )
+                if collector is not None:
+                    collected_stats.extend(stream_runner.last_subscription_stats)
                 for err_msg in getattr(stream_runner, "stream_errors", []):
                     err_str = str(err_msg.get("error"))
                     results.append(
@@ -249,6 +281,13 @@ class CLIApplicationRunner:
                         )
                     )
         finally:
+            if (stats_enabled or stats_file) and collected_stats:
+                write_cli_stats(
+                    collected_stats,
+                    print_stderr=stats_enabled,
+                    fmt=stats_format,
+                    file_path=stats_file,
+                )
             for handler in handlers:
                 handler.close()
 

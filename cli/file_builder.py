@@ -457,5 +457,8 @@ class FileConfigBuilder(ConfigBuilder):
             log_file=d.get('log_file', ''),
             requests=requests,
             device_registry=device_registry if raw_devices else None,
+            stats=bool(global_cfg.get('stats', d.get('stats', False))),
+            stats_format=str(global_cfg.get('stats_format', d.get('stats_format', 'table'))),
+            stats_file=global_cfg.get('stats_file', d.get('stats_file')),
         )
 

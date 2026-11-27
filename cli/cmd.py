@@ -96,7 +96,14 @@ def config_builder(args: Any) -> ParsedConfig:
     config_file = getattr(args, 'config', '') or getattr(args, 'global_config', '')
     if config_file and (getattr(args, 'protocol', None) is None or getattr(args, 'operation', None) is None):
         protocol = getattr(args, 'protocol', 'unknown')
-        return FileConfigBuilder(config_file, protocol=protocol).build()
+        parsed = FileConfigBuilder(config_file, protocol=protocol).build()
+        if getattr(args, 'stats', False):
+            parsed.stats = True
+        if getattr(args, 'stats_format', None):
+            parsed.stats_format = args.stats_format
+        if getattr(args, 'stats_file', None):
+            parsed.stats_file = args.stats_file
+        return parsed
     else:
         return CLIConfigBuilder(args).build()
 

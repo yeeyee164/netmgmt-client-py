@@ -12,6 +12,7 @@ import time
 from typing import Any, Dict, Optional
 
 from managers.subscribe_session import SubscribeSession
+from modules.stats_hooks import NOOP_STATS_RECORDER, StatsRecorder, safe_record
 
 _STOP_SENTINEL = object()
 
@@ -31,16 +32,25 @@ class FanoutQueue(queue.Queue):
     multi-consumer non-blocking broadcast fan-out with per-consumer DROP_OLDEST overflow.
     """
 
-    def __init__(self, maxsize: int = 1000):
+    handles_drop_stats: bool = True
+
+    def __init__(
+        self,
+        maxsize: int = 1000,
+        *,
+        subscription_id: Optional[str] = None,
+        stats_recorder: Optional[StatsRecorder] = None,
+    ):
         super().__init__(maxsize=maxsize)
         self._fanout_lock = threading.Lock()
         self._consumers: Dict[str, _ConsumerQueue] = {}
         self._closed: bool = False
         self.dropped_count: int = 0
         self._next_seq: int = 1
+        self._subscription_id = subscription_id
+        self._stats_recorder: StatsRecorder = stats_recorder or NOOP_STATS_RECORDER
 
-    @staticmethod
-    def _drop_oldest_and_put(q: queue.Queue, item: Any) -> bool:
+    def _drop_oldest_and_put(self, q: queue.Queue, item: Any) -> bool:
         dropped = False
         try:
             queue.Queue.put(q, item, block=False)
@@ -50,6 +60,12 @@ class FanoutQueue(queue.Queue):
                 q.task_done()
                 dropped = True
                 q.dropped_count = getattr(q, "dropped_count", 0) + 1
+                if self._subscription_id:
+                    safe_record(
+                        self._stats_recorder.record_subscription_drop,
+                        self._subscription_id,
+                        "queue_full",
+                    )
             except (queue.Empty, ValueError):
                 pass
             try:
@@ -68,10 +84,18 @@ class FanoutQueue(queue.Queue):
                 item = {**item, "sequence": seq}
             if not self._consumers:
                 self._drop_oldest_and_put(self, item)
-                return
-            for cq in self._consumers.values():
-                if self._drop_oldest_and_put(cq, item):
-                    self.dropped_count += 1
+                depth = self.qsize()
+            else:
+                for cq in self._consumers.values():
+                    if self._drop_oldest_and_put(cq, item):
+                        self.dropped_count += 1
+                depth = max((cq.qsize() for cq in self._consumers.values()), default=0)
+            if self._subscription_id:
+                safe_record(
+                    self._stats_recorder.record_subscription_queue_depth,
+                    self._subscription_id,
+                    depth,
+                )
 
     def put_nowait(self, item: Any) -> None:
         self.put(item, block=False)
@@ -96,11 +120,37 @@ class FanoutQueue(queue.Queue):
                 except queue.Full:
                     pass
             self._consumers[consumer_id] = cq
+            if self._subscription_id:
+                depth = max((c.qsize() for c in self._consumers.values()), default=0)
+                safe_record(
+                    self._stats_recorder.record_subscription_queue_depth,
+                    self._subscription_id,
+                    depth,
+                )
             return cq
 
     def unregister_consumer(self, consumer_id: str) -> None:
         with self._fanout_lock:
-            self._consumers.pop(consumer_id, None)
+            cq = self._consumers.pop(consumer_id, None)
+            if cq is not None and not self._closed and self._subscription_id:
+                unread = cq.qsize()
+                for _ in range(unread):
+                    safe_record(
+                        self._stats_recorder.record_subscription_drop,
+                        self._subscription_id,
+                        "consumer_gone",
+                    )
+            if self._subscription_id:
+                depth = (
+                    max((c.qsize() for c in self._consumers.values()), default=0)
+                    if self._consumers
+                    else self.qsize()
+                )
+                safe_record(
+                    self._stats_recorder.record_subscription_queue_depth,
+                    self._subscription_id,
+                    depth,
+                )
 
     def close(self) -> None:
         with self._fanout_lock:

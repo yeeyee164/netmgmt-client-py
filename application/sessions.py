@@ -32,6 +32,7 @@ from application.exceptions import (
 from config.model import SecurityProfile
 from config.operations import NetconfTransactionOperation, TransactionType
 from managers.factory import ClientFactory
+from modules.stats_hooks import NOOP_STATS_RECORDER, StatsRecorder, safe_record
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,8 @@ class SessionLease:
     client: Any
     locked_datastores: Set[str] = field(default_factory=set)
     has_uncommitted_changes: bool = False
+    lock_acquired_at: Dict[str, float] = field(default_factory=dict)
+    stats_recorder: StatsRecorder = NOOP_STATS_RECORDER
 
     def record_step_outcome(self, step: OperationStepDTO, success: bool) -> None:
         """
@@ -100,10 +103,23 @@ class SessionLease:
         norm_op = step.op_type.strip().lower().replace("-", "_")
         if norm_op == "lock":
             ds = step.datastore if step.datastore != "all" else "candidate"
-            self.locked_datastores.add(ds)
+            if ds not in self.locked_datastores:
+                self.locked_datastores.add(ds)
+                self.lock_acquired_at[ds] = time.perf_counter()
+                safe_record(self.stats_recorder.record_datastore_lock_acquired, self.endpoint.target, ds)
         elif norm_op == "unlock":
             ds = step.datastore if step.datastore != "all" else "candidate"
-            self.locked_datastores.discard(ds)
+            if ds in self.locked_datastores:
+                self.locked_datastores.discard(ds)
+                acq = self.lock_acquired_at.pop(ds, None)
+                hold_ms = max(0.0, (time.perf_counter() - acq) * 1000.0) if acq is not None else 0.0
+                safe_record(
+                    self.stats_recorder.record_datastore_lock_released,
+                    self.endpoint.target,
+                    ds,
+                    hold_ms,
+                    reclaimed=False,
+                )
         elif norm_op in ("set", "edit_config", "edit"):
             target_ds = (
                 step.datastore
@@ -140,6 +156,7 @@ class _ManagedSessionRecord:
     lease_count: int = 0
     locked_datastores: Set[str] = field(default_factory=set)
     has_uncommitted_changes: bool = False
+    lock_acquired_at: Dict[str, float] = field(default_factory=dict)
     op_lock: threading.RLock = field(default_factory=threading.RLock)
 
     def to_dto(self) -> SessionInfoDTO:
@@ -174,6 +191,7 @@ class DeviceSessionManager:
         device_registry: Optional[DeviceRegistryService] = None,
         default_ttl_seconds: float = 300.0,
         client_factory: Optional[Callable[..., Any]] = None,
+        stats_recorder: Optional[StatsRecorder] = None,
     ):
         if default_ttl_seconds <= 0:
             raise InvalidRequestError(
@@ -183,8 +201,32 @@ class DeviceSessionManager:
         self._registry = device_registry or DeviceRegistryService()
         self._default_ttl_seconds = float(default_ttl_seconds)
         self._client_factory = client_factory or ClientFactory.get_client
+        self._stats_recorder: StatsRecorder = stats_recorder or NOOP_STATS_RECORDER
         self._lock = threading.RLock()
         self._sessions: Dict[str, _ManagedSessionRecord] = {}
+        if hasattr(self._stats_recorder, "register_gauge_provider"):
+            self._stats_recorder.register_gauge_provider(
+                "sessions_active", self._live_sessions_by_protocol
+            )
+            self._stats_recorder.register_gauge_provider(
+                "datastore_locks_active", self._live_locks_count
+            )
+
+    def _live_sessions_by_protocol(self) -> Dict[str, int]:
+        with self._lock:
+            counts: Dict[str, int] = {}
+            for rec in self._sessions.values():
+                if rec.state not in (LogicalSessionState.CLOSING, LogicalSessionState.CLOSED):
+                    counts[rec.protocol] = counts.get(rec.protocol, 0) + 1
+            return counts
+
+    def _live_locks_count(self) -> int:
+        with self._lock:
+            return sum(
+                len(rec.locked_datastores)
+                for rec in self._sessions.values()
+                if rec.state not in (LogicalSessionState.CLOSING, LogicalSessionState.CLOSED)
+            )
 
     def create_session(
         self,
@@ -256,7 +298,12 @@ class DeviceSessionManager:
         )
         with self._lock:
             self._sessions[session_id] = record
-            return record.to_dto()
+        safe_record(
+            self._stats_recorder.record_session_opened,
+            record.protocol,
+            record.endpoint.target,
+        )
+        return record.to_dto()
 
     def get_session_info(
         self,
@@ -327,6 +374,11 @@ class DeviceSessionManager:
                 record.lease_count += 1
 
         if expired_record is not None:
+            safe_record(
+                self._stats_recorder.record_session_idle_eviction,
+                expired_record.protocol,
+                expired_record.endpoint.target,
+            )
             self._cleanup_record(expired_record, reason="idle_expiry")
             raise SessionNotFoundError(f"Logical session '{session_id}' has expired.")
 
@@ -350,6 +402,8 @@ class DeviceSessionManager:
                     client=record.client,
                     locked_datastores=set(record.locked_datastores),
                     has_uncommitted_changes=record.has_uncommitted_changes,
+                    lock_acquired_at=dict(record.lock_acquired_at),
+                    stats_recorder=self._stats_recorder,
                 )
 
             yield lease
@@ -359,6 +413,7 @@ class DeviceSessionManager:
                 if "lease" in locals():
                     record.locked_datastores = set(lease.locked_datastores)
                     record.has_uncommitted_changes = lease.has_uncommitted_changes
+                    record.lock_acquired_at = dict(lease.lock_acquired_at)
                 record.last_activity = now
                 record.expires_at = now + record.ttl_seconds
                 record.lease_count = max(0, record.lease_count - 1)
@@ -415,6 +470,11 @@ class DeviceSessionManager:
 
         closed_ids: List[str] = []
         for record in to_close:
+            safe_record(
+                self._stats_recorder.record_session_idle_eviction,
+                record.protocol,
+                record.endpoint.target,
+            )
             self._cleanup_record(record, reason="idle_expiry")
             closed_ids.append(record.session_id)
         return closed_ids
@@ -459,6 +519,24 @@ class DeviceSessionManager:
                                 f"[DeviceSessionManager] Best-effort unlock '{ds}' failed on session "
                                 f"'{record.session_id}' ({reason}): {exc}"
                             )
+                        acq = record.lock_acquired_at.pop(ds, None)
+                        hold_ms = (
+                            max(0.0, (time.perf_counter() - acq) * 1000.0)
+                            if acq is not None
+                            else 0.0
+                        )
+                        safe_record(
+                            self._stats_recorder.record_datastore_lock_released,
+                            record.endpoint.target,
+                            ds,
+                            hold_ms,
+                            reclaimed=True,
+                        )
+                        safe_record(
+                            self._stats_recorder.record_netconf_rollback,
+                            record.endpoint.target,
+                            "forced_unlock",
+                        )
                     record.locked_datastores.clear()
             finally:
                 if record.client is not None:
@@ -471,3 +549,9 @@ class DeviceSessionManager:
                         )
                 with self._lock:
                     record.state = LogicalSessionState.CLOSED
+                safe_record(
+                    self._stats_recorder.record_session_closed,
+                    record.protocol,
+                    record.endpoint.target,
+                    reason,
+                )

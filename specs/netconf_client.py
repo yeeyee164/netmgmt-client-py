@@ -15,6 +15,7 @@ except ImportError:
 from specs.base_client import BaseClient, UnsupportedOperationError
 from specs.stream_types import StreamContext, StreamEvent
 from modules.security import SecurityModule
+from modules.stats_hooks import NOOP_STATS_RECORDER, StatsRecorder, safe_record
 from config.schema import SchemaConfig, SchemaProfile, ModuleRef
 from config.operations import (
     CapabilitiesOperation,
@@ -57,6 +58,69 @@ class NetconfClient(BaseClient):
         schema_cfg = kwargs.get('schema_config') or kwargs.get('schema')
         self.schema_config = schema_cfg if isinstance(schema_cfg, SchemaConfig) else SchemaConfig()
         self.schema_profile: Optional[SchemaProfile] = None
+        self.stats_recorder: StatsRecorder = kwargs.get('stats_recorder') or NOOP_STATS_RECORDER
+        self._last_rpc_metrics: Optional[dict[str, Any]] = None
+
+    def consume_last_rpc_metrics(self) -> Optional[dict[str, Any]]:
+        """Returns and clears accumulated wire RPC telemetry for the most recent operation."""
+        metrics = self._last_rpc_metrics
+        self._last_rpc_metrics = None
+        return metrics
+
+    @staticmethod
+    def _estimate_xml_bytes(payload: Any) -> int:
+        if payload is None:
+            return 0
+        if isinstance(payload, bytes):
+            return len(payload)
+        if isinstance(payload, str):
+            return len(payload.encode("utf-8"))
+        xml_attr = getattr(payload, "xml", None)
+        if isinstance(xml_attr, str):
+            return len(xml_attr.encode("utf-8"))
+        data_xml_attr = getattr(payload, "data_xml", None)
+        if isinstance(data_xml_attr, str):
+            return len(data_xml_attr.encode("utf-8"))
+        if isinstance(payload, (list, tuple)):
+            return sum(NetconfClient._estimate_xml_bytes(x) for x in payload)
+        return len(str(payload).encode("utf-8"))
+
+    @staticmethod
+    def _classify_netconf_error(exc: Exception) -> tuple[str, str]:
+        if isinstance(exc, (SchemaValidationError, InvalidSchemaPathError, SchemaError)):
+            return ("validation_error", type(exc).__name__)
+        if isinstance(exc, TimeoutError):
+            return ("timeout_error", "TimeoutError")
+        tag = getattr(exc, "tag", None)
+        if tag or type(exc).__name__ == "RPCError" or isinstance(exc, RPCError):
+            return ("netconf_rpc_error", str(tag or type(exc).__name__))
+        return ("transport_error", type(exc).__name__)
+
+    def _accumulate_wire_metrics(
+        self,
+        *,
+        wire_rpc_ms: float,
+        request_bytes: int = 0,
+        response_bytes: int = 0,
+        path_count: int = 0,
+        error_category: Optional[str] = None,
+        error_code: Optional[str] = None,
+    ) -> None:
+        cur = self._last_rpc_metrics or {
+            "wire_rpc_ms": 0.0,
+            "request_bytes": 0,
+            "response_bytes": 0,
+            "path_count": 0,
+        }
+        cur["wire_rpc_ms"] += max(0.0, float(wire_rpc_ms))
+        cur["request_bytes"] += max(0, int(request_bytes))
+        cur["response_bytes"] += max(0, int(response_bytes))
+        cur["path_count"] = max(cur["path_count"], int(path_count))
+        if error_category:
+            cur["error_category"] = error_category
+        if error_code:
+            cur["error_code"] = error_code
+        self._last_rpc_metrics = cur
 
     def __enter__(self):
         host, port = self.target.split(':')
@@ -185,10 +249,28 @@ class NetconfClient(BaseClient):
         fmt = format
         if fmt and fmt.lower() == 'yang':
             fmt = None
-        res = self.session.get_schema(
-            identifier=identifier,
-            version=version or None,
-            format=fmt
+        t0 = time.perf_counter()
+        try:
+            res = self.session.get_schema(
+                identifier=identifier,
+                version=version or None,
+                format=fmt
+            )
+        except Exception as exc:
+            err_cat, err_code = self._classify_netconf_error(exc)
+            self._accumulate_wire_metrics(
+                wire_rpc_ms=(time.perf_counter() - t0) * 1000.0,
+                request_bytes=len(str(identifier).encode("utf-8")),
+                path_count=1,
+                error_category=err_cat,
+                error_code=err_code,
+            )
+            raise
+        self._accumulate_wire_metrics(
+            wire_rpc_ms=(time.perf_counter() - t0) * 1000.0,
+            request_bytes=len(str(identifier).encode("utf-8")),
+            response_bytes=self._estimate_xml_bytes(res),
+            path_count=1,
         )
         content = self._extract_schema_content(res)
         if content:
@@ -207,10 +289,12 @@ class NetconfClient(BaseClient):
 
     def execute_capabilities(self, operation: CapabilitiesOperation) -> Any:
         """Executes Capabilities discovery based on CapabilitiesOperation."""
+        self._last_rpc_metrics = None
         return self.capability()
 
     def execute_schema(self, operation: GetSchemaOperation) -> Any:
         """Executes schema retrieval based on GetSchemaOperation."""
+        self._last_rpc_metrics = None
         try:
             return self.get_schema(
                 identifier=operation.identifier,
@@ -222,6 +306,7 @@ class NetconfClient(BaseClient):
 
     def execute_get(self, operation: GetOperation) -> Any:
         """Executes <get> or <get-config> based on GetOperation."""
+        self._last_rpc_metrics = None
         filter_arg = None
         paths = []
         if isinstance(operation.selector, FilterSelector):
@@ -248,6 +333,7 @@ class NetconfClient(BaseClient):
 
     def execute_set(self, operation: SetOperation) -> Any:
         """Executes <edit-config> within an RFC 6241 candidate transaction workflow."""
+        self._last_rpc_metrics = None
         target_ds = "candidate"
         default_op = "merge"
         error_opt = "stop-on-error"
@@ -390,6 +476,7 @@ class NetconfClient(BaseClient):
 
     def execute_transaction(self, operation: NetconfTransactionOperation) -> Any:
         """Executes explicit transaction lifecycle operations based on NetconfTransactionOperation."""
+        self._last_rpc_metrics = None
         op_type = operation.operation
         if op_type == TransactionType.LOCK:
             return self.lock(target=operation.target_datastore)
@@ -475,18 +562,34 @@ class NetconfClient(BaseClient):
 
             logger.debug(f"[NetconfClient] Operation: {op}, source: {source}")
 
+            req_bytes = self._estimate_xml_bytes(filter_xml)
+            path_cnt = len(paths) if paths else (1 if filter_xml else 0)
+            t0 = time.perf_counter()
             if op == 'get-config':
                 src = source if source else 'running'
                 if filter_xml:
-                    return self.session.get_config(source=src, filter=filter_xml)
+                    res = self.session.get_config(source=src, filter=filter_xml)
                 else:
-                    return self.session.get_config(source=src)
+                    res = self.session.get_config(source=src)
             else:
                 if filter_xml:
-                    return self.session.get(filter=filter_xml)
+                    res = self.session.get(filter=filter_xml)
                 else:
-                    return self.session.get()
+                    res = self.session.get()
+            self._accumulate_wire_metrics(
+                wire_rpc_ms=(time.perf_counter() - t0) * 1000.0,
+                request_bytes=req_bytes,
+                response_bytes=self._estimate_xml_bytes(res),
+                path_count=path_cnt,
+            )
+            return res
         except RPCError as e:
+            err_cat, err_code = self._classify_netconf_error(e)
+            self._accumulate_wire_metrics(
+                wire_rpc_ms=0.0,
+                error_category=err_cat,
+                error_code=err_code,
+            )
             return e
 
     def _has_capability(self, name: str) -> bool:
@@ -500,11 +603,29 @@ class NetconfClient(BaseClient):
                 f"[NetconfClient] Server does not advertise required capability '{name}'."
             )
 
+    def _call_session_tx(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        t0 = time.perf_counter()
+        try:
+            res = fn(*args, **kwargs)
+        except Exception as exc:
+            err_cat, err_code = self._classify_netconf_error(exc)
+            self._accumulate_wire_metrics(
+                wire_rpc_ms=(time.perf_counter() - t0) * 1000.0,
+                error_category=err_cat,
+                error_code=err_code,
+            )
+            raise
+        self._accumulate_wire_metrics(
+            wire_rpc_ms=(time.perf_counter() - t0) * 1000.0,
+            response_bytes=self._estimate_xml_bytes(res),
+        )
+        return res
+
     def lock(self, target: str = "candidate") -> Any:
-        return self.session.lock(target=target)
+        return self._call_session_tx(self.session.lock, target=target)
 
     def unlock(self, target: str = "candidate") -> Any:
-        return self.session.unlock(target=target)
+        return self._call_session_tx(self.session.unlock, target=target)
 
     def commit(
         self,
@@ -525,21 +646,25 @@ class NetconfClient(BaseClient):
         if persist_id:
             kwargs["persist_id"] = persist_id
 
-        return self.session.commit(**kwargs)
+        return self._call_session_tx(self.session.commit, **kwargs)
 
     def cancel_commit(self, persist_id: Optional[str] = None) -> Any:
         self._check_capability(":candidate")
         self._check_capability(":confirmed-commit")
         kwargs = {"persist_id": persist_id} if persist_id else {}
-        return self.session.cancel_commit(**kwargs)
+        res = self._call_session_tx(self.session.cancel_commit, **kwargs)
+        safe_record(self.stats_recorder.record_netconf_rollback, self.target, "cancel_commit")
+        return res
 
     def discard_changes(self) -> Any:
         self._check_capability(":candidate")
-        return self.session.discard_changes()
+        res = self._call_session_tx(self.session.discard_changes)
+        safe_record(self.stats_recorder.record_netconf_rollback, self.target, "discard_changes")
+        return res
 
     def validate(self, source: str = "candidate") -> Any:
         self._check_capability(":validate")
-        return self.session.validate(source=source)
+        return self._call_session_tx(self.session.validate, source=source)
 
     def set(self,
             updates: Optional[list] = None,
@@ -672,9 +797,22 @@ class NetconfClient(BaseClient):
             if test_option:
                 edit_kwargs['test_option'] = test_option
 
+            req_bytes = self._estimate_xml_bytes(config_xml)
+            t0 = time.perf_counter()
             res = self.session.edit_config(**edit_kwargs)
+            self._accumulate_wire_metrics(
+                wire_rpc_ms=(time.perf_counter() - t0) * 1000.0,
+                request_bytes=req_bytes,
+                response_bytes=self._estimate_xml_bytes(res),
+            )
             return res
         except RPCError as e:
+            err_cat, err_code = self._classify_netconf_error(e)
+            self._accumulate_wire_metrics(
+                wire_rpc_ms=0.0,
+                error_category=err_cat,
+                error_code=err_code,
+            )
             return e
 
     def _parse_event_time_to_posix(self, event_time_str: Optional[str]) -> float:
@@ -834,7 +972,13 @@ class NetconfClient(BaseClient):
         except Exception as e:
             if context.is_cancelled:
                 return
-            yield StreamEvent(protocol="netconf", timestamp=time.time(), raw_payload=None, error=e)
+            yield StreamEvent(
+                protocol="netconf",
+                timestamp=time.time(),
+                raw_payload=None,
+                error=e,
+                event_kind="error",
+            )
             return
 
         # 4. Continuous Notification Consumer Loop
@@ -866,6 +1010,7 @@ class NetconfClient(BaseClient):
                     raw_payload=raw_xml,
                     data=event_dict,
                     is_sync_marker=is_replay_complete,
+                    event_kind="sync_response" if is_replay_complete else "notification",
                 )
 
                 # Termination on bounded replay complete
@@ -878,7 +1023,13 @@ class NetconfClient(BaseClient):
             except Exception as e:
                 if context.is_cancelled:
                     break
-                yield StreamEvent(protocol="netconf", timestamp=time.time(), raw_payload=None, error=e)
+                yield StreamEvent(
+                    protocol="netconf",
+                    timestamp=time.time(),
+                    raw_payload=None,
+                    error=e,
+                    event_kind="error",
+                )
                 break
 
     def subscribe(self, *args, **kwargs) -> Iterator[Any]:

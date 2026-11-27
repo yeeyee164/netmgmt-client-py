@@ -37,6 +37,11 @@ class ParsedConfig:
     requests: List[Any] = field(default_factory=list)
     device_registry: Optional[Any] = None
 
+    # Statistics & Observability presentation options
+    stats: bool = False
+    stats_format: str = "table"
+    stats_file: Optional[str] = None
+
     def __post_init__(self):
         if self.sessions and not self.requests:
             for s in self.sessions:

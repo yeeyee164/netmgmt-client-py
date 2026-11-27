@@ -12,10 +12,14 @@ from application.dto import (
     DeliveryModeDTO,
     ExecutionRequestDTO,
     ExecutionResultDTO,
+    ExecutionStatsDTO,
+    LatencySummaryDTO,
     MutationChangeDTO,
     OperationStepDTO,
     SessionInfoDTO,
+    StatsSnapshotDTO,
     StreamEventDTO,
+    SubscriptionStatsDTO,
     TelemetryPolicyDTO,
 )
 from application.exceptions import InvalidRequestError, PermissionDeniedError
@@ -35,6 +39,17 @@ from api.schemas.schemas import SchemaModuleSchema
 from api.schemas.sessions import (
     SessionExecutionRequestSchema,
     SessionInfoResponseSchema,
+)
+from api.schemas.stats import (
+    ExecutionStatsSchema,
+    ExecutionStepStatsSchema,
+    LatencySummarySchema,
+    OperationStatsSummarySchema,
+    RuntimeHealthStatsSchema,
+    SchemaStatsSummarySchema,
+    SessionStatsSummarySchema,
+    StatsSnapshotResponseSchema,
+    SubscriptionStatsResponseSchema,
 )
 from api.schemas.subscriptions import (
     StreamEventSchema,
@@ -247,6 +262,139 @@ def to_session_execution_request_dto(
     )
 
 
+def to_execution_stats_schema(
+    dto: Optional[ExecutionStatsDTO],
+) -> Optional[ExecutionStatsSchema]:
+    """Converts `ExecutionStatsDTO` into `ExecutionStatsSchema`."""
+    if dto is None:
+        return None
+    return ExecutionStatsSchema(
+        protocol=dto.protocol,
+        target=dto.target,
+        request_id=dto.request_id,
+        total_duration_ms=dto.total_duration_ms,
+        connect_duration_ms=dto.connect_duration_ms,
+        connection_reused=dto.connection_reused,
+        validation_duration_ms=dto.validation_duration_ms,
+        validation_passed=dto.validation_passed,
+        operations_total=dto.operations_total,
+        operations_succeeded=dto.operations_succeeded,
+        operations_failed=dto.operations_failed,
+        operations_aborted=dto.operations_aborted,
+        request_payload_bytes=dto.request_payload_bytes,
+        response_payload_bytes=dto.response_payload_bytes,
+        rollbacks=dict(dto.rollbacks),
+        steps=[
+            ExecutionStepStatsSchema(
+                step_index=st.step_index,
+                op_type=st.op_type,
+                success=st.success,
+                aborted=st.aborted,
+                duration_ms=st.duration_ms,
+                wire_rpc_ms=st.wire_rpc_ms,
+                request_bytes=st.request_bytes,
+                response_bytes=st.response_bytes,
+                path_count=st.path_count,
+                error_category=st.error_category,
+                error_code=st.error_code,
+            )
+            for st in dto.steps
+        ],
+    )
+
+
+def to_latency_summary_schema(dto: LatencySummaryDTO) -> LatencySummarySchema:
+    return LatencySummarySchema(
+        count=dto.count,
+        min_ms=dto.min_ms,
+        avg_ms=dto.avg_ms,
+        p50_ms=dto.p50_ms,
+        p95_ms=dto.p95_ms,
+        p99_ms=dto.p99_ms,
+        max_ms=dto.max_ms,
+    )
+
+
+def to_subscription_stats_schema(
+    dto: SubscriptionStatsDTO,
+) -> SubscriptionStatsResponseSchema:
+    return SubscriptionStatsResponseSchema(
+        subscription_id=dto.subscription_id,
+        protocol=dto.protocol,
+        delivery_mode=dto.delivery_mode,
+        target=dto.target,
+        owner_id=dto.owner_id,
+        active=dto.active,
+        uptime_seconds=dto.uptime_seconds,
+        events_by_kind=dict(dto.events_by_kind),
+        events_total=dto.events_total,
+        event_rate_eps=dto.event_rate_eps,
+        time_to_first_event_ms=dto.time_to_first_event_ms,
+        time_to_sync_ms=dto.time_to_sync_ms,
+        queue_depth_current=dto.queue_depth_current,
+        queue_depth_peak=dto.queue_depth_peak,
+        events_dropped=dict(dto.events_dropped),
+        poll_triggers_total=dto.poll_triggers_total,
+        disconnect_reason=dto.disconnect_reason,
+    )
+
+
+def to_stats_snapshot_response(dto: StatsSnapshotDTO) -> StatsSnapshotResponseSchema:
+    return StatsSnapshotResponseSchema(
+        generated_at_epoch=dto.generated_at_epoch,
+        operations=OperationStatsSummarySchema(
+            total=dto.operations.total,
+            succeeded=dto.operations.succeeded,
+            failed=dto.operations.failed,
+            aborted=dto.operations.aborted,
+            by_protocol=dict(dto.operations.by_protocol),
+            by_target=dict(dto.operations.by_target),
+            by_op_type=dict(dto.operations.by_op_type),
+            errors_by_category=dict(dto.operations.errors_by_category),
+            netconf_rollbacks=dict(dto.operations.netconf_rollbacks),
+            request_bytes_total=dto.operations.request_bytes_total,
+            response_bytes_total=dto.operations.response_bytes_total,
+            execution_latency=to_latency_summary_schema(dto.operations.execution_latency),
+            connect_latency=to_latency_summary_schema(dto.operations.connect_latency),
+            wire_rpc_latency=to_latency_summary_schema(dto.operations.wire_rpc_latency),
+        ),
+        subscriptions_active=dto.subscriptions_active,
+        subscriptions=[to_subscription_stats_schema(s) for s in dto.subscriptions],
+        sessions=SessionStatsSummarySchema(
+            active=dto.sessions.active,
+            active_by_protocol=dict(dto.sessions.active_by_protocol),
+            created_total=dto.sessions.created_total,
+            closed_by_reason=dict(dto.sessions.closed_by_reason),
+            operations_per_session_avg=dto.sessions.operations_per_session_avg,
+            datastore_locks_active=dto.sessions.datastore_locks_active,
+            datastore_lock_hold_ms=to_latency_summary_schema(
+                dto.sessions.datastore_lock_hold_ms
+            ),
+            idle_evictions_total=dto.sessions.idle_evictions_total,
+            orphaned_lock_reclaims_total=dto.sessions.orphaned_lock_reclaims_total,
+            reconnects_total=dto.sessions.reconnects_total,
+        ),
+        schemas=SchemaStatsSummarySchema(
+            validations_passed=dto.schemas.validations_passed,
+            validations_failed=dto.schemas.validations_failed,
+            validation_latency=to_latency_summary_schema(dto.schemas.validation_latency),
+            cache_hits=dict(dto.schemas.cache_hits),
+            cache_misses=dict(dto.schemas.cache_misses),
+            cache_hit_ratio=dto.schemas.cache_hit_ratio,
+            profiles_loaded=dto.schemas.profiles_loaded,
+            compile_latency=to_latency_summary_schema(dto.schemas.compile_latency),
+        ),
+        runtime=RuntimeHealthStatsSchema(
+            process_uptime_seconds=dto.runtime.process_uptime_seconds,
+            worker_threads_active=dict(dto.runtime.worker_threads_active),
+            worker_semaphore_wait=to_latency_summary_schema(
+                dto.runtime.worker_semaphore_wait
+            ),
+            websocket_clients_active=dict(dto.runtime.websocket_clients_active),
+        ),
+    )
+
+
 def to_execution_result_schema(dto: ExecutionResultDTO) -> ExecutionResultSchema:
     """Converts `ExecutionResultDTO` into `ExecutionResultSchema`, preserving all steps and redacting errors."""
     steps = [
@@ -268,6 +416,7 @@ def to_execution_result_schema(dto: ExecutionResultDTO) -> ExecutionResultSchema
         error_summary=redact_sensitive_text(dto.error_summary),
         error_code=dto.error_code,
         execution_time_ms=dto.execution_time_ms,
+        stats=to_execution_stats_schema(dto.stats),
     )
 
 

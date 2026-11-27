@@ -109,6 +109,9 @@ class CLIConfigBuilder(ConfigBuilder):
             log_level=self.args.log_level,
             syslog_server=self.args.syslog_server,
             log_file=self.args.log_file,
+            stats=bool(getattr(self.args, 'stats', False)),
+            stats_format=getattr(self.args, 'stats_format', 'table') or 'table',
+            stats_file=getattr(self.args, 'stats_file', None),
         )
 
     def _build_security_profile(self) -> SecurityProfile:

@@ -39,18 +39,21 @@ class ClientFactory:
         schema_cfg = kwargs.pop('schema_config', None) or kwargs.pop('schema', None)
         insecure = kwargs.pop('insecure', False)
         device = kwargs.pop('device', 'default')
+        stats_recorder = kwargs.pop('stats_recorder', None)
 
         if protocol == "gnmi":
             return GNMIClient(target, username, password,
                               security_module,
                               insecure=insecure,
                               schema_config=schema_cfg,
+                              stats_recorder=stats_recorder,
                               **kwargs)
         elif protocol == "netconf":
             return NetconfClient(target, username, password,
                                  security_module,
                                  device=device,
                                  schema_config=schema_cfg,
+                                 stats_recorder=stats_recorder,
                                  **kwargs)
         elif protocol == "restconf":
             raise NotImplementedError("RESTCONF client support is coming soon!")

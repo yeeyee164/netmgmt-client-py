@@ -55,3 +55,4 @@ class StreamEvent:
     data: Optional[Dict[str, Any]] = None
     is_sync_marker: bool = False
     error: Optional[Exception] = None
+    event_kind: str = "update"

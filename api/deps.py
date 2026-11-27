@@ -4,9 +4,12 @@ FastAPI dependency providers, application settings, service wiring, and authenti
 """
 
 from dataclasses import dataclass, field
+import inspect
 import os
 import secrets
+import time
 from typing import Any, Optional
+import uuid
 
 import anyio
 from fastapi import Depends, Request, WebSocket
@@ -15,8 +18,9 @@ from application.devices import DeviceRegistryService
 from application.operations import DeviceOperationService
 from application.schemas import SchemaCatalogService
 from application.sessions import DeviceSessionManager
+from application.stats import StatsCollector, StatsService
 from application.subscriptions import SubscriptionService
-from api.exceptions import APIAuthenticationError
+from api.exceptions import APIAuthenticationError, APIAuthorizationError
 
 
 def _parse_bool(val: Optional[str], default: bool) -> bool:
@@ -101,6 +105,7 @@ class APISettings:
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     )
+    admin_owners: tuple[str, ...] = ()
 
     def validate_startup(self) -> None:
         """Validates production security and single-process deployment invariants at startup."""
@@ -142,6 +147,7 @@ class APISettings:
             cors_origins=_parse_csv(cors_raw)
             if cors_raw is not None
             else ("http://localhost:3000", "http://127.0.0.1:3000"),
+            admin_owners=_parse_csv(os.getenv("NETMGMT_ADMIN_OWNERS")),
         )
 
 
@@ -150,23 +156,29 @@ def build_services(settings: Optional[APISettings] = None) -> dict[str, Any]:
     Constructs and wires the Application Service Layer instances for one FastAPI app.
     """
     effective = settings or APISettings()
+    stats_collector = StatsCollector()
+    stats_service = StatsService(collector=stats_collector)
+
     device_registry = DeviceRegistryService()
     if effective.device_seed_file:
         device_registry.seed_from_env_file(effective.device_seed_file)
 
-    schema_service = SchemaCatalogService()
+    schema_service = SchemaCatalogService(stats_recorder=stats_collector)
     session_manager = DeviceSessionManager(
         device_registry=device_registry,
         default_ttl_seconds=effective.session_ttl_seconds,
+        stats_recorder=stats_collector,
     )
     operation_service = DeviceOperationService(
         device_registry=device_registry,
         schema_service=schema_service,
         session_manager=session_manager,
+        stats_recorder=stats_collector,
     )
     subscription_service = SubscriptionService(
         device_registry=device_registry,
         operation_service=operation_service,
+        stats_recorder=stats_collector,
     )
     return {
         "device_registry": device_registry,
@@ -174,6 +186,8 @@ def build_services(settings: Optional[APISettings] = None) -> dict[str, Any]:
         "session_manager": session_manager,
         "operation_service": operation_service,
         "subscription_service": subscription_service,
+        "stats_collector": stats_collector,
+        "stats_service": stats_service,
     }
 
 
@@ -211,7 +225,12 @@ def _resolve_principal(
     if token is not None:
         for configured_token, owner_id in settings.api_keys.items():
             if secrets.compare_digest(token, configured_token):
-                return Principal(owner_id=owner_id)
+                scopes = (
+                    frozenset({"read", "write", "admin"})
+                    if owner_id in settings.admin_owners
+                    else frozenset({"read", "write"})
+                )
+                return Principal(owner_id=owner_id, scopes=scopes)
         if settings.auth_enabled:
             raise APIAuthenticationError("Invalid API credentials.")
 
@@ -219,7 +238,12 @@ def _resolve_principal(
         raise APIAuthenticationError("Missing authentication credentials.")
 
     owner = x_owner_id.strip() if x_owner_id and x_owner_id.strip() else settings.default_owner_id
-    return Principal(owner_id=owner)
+    scopes = (
+        frozenset({"read", "write", "admin"})
+        if owner in settings.admin_owners
+        else frozenset({"read", "write"})
+    )
+    return Principal(owner_id=owner, scopes=scopes)
 
 
 def get_api_settings(request: Request) -> APISettings:
@@ -250,6 +274,62 @@ def get_rpc_limiter(request: Request) -> anyio.CapacityLimiter:
     return request.app.state.rpc_limiter
 
 
+def get_stats_service(request: Request) -> StatsService:
+    return request.app.state.stats_service
+
+
+def get_stats_collector(request: Request) -> Optional[StatsCollector]:
+    return getattr(request.app.state, "stats_collector", None)
+
+
+def get_request_id(request: Request) -> str:
+    rid = getattr(request.state, "request_id", None) or request.headers.get("x-request-id")
+    if rid and str(rid).strip():
+        return str(rid).strip()
+    return str(uuid.uuid4())
+
+
+def call_with_optional_request_id(
+    fn: Any,
+    *args: Any,
+    request_id: Optional[str] = None,
+    **kwargs: Any,
+) -> Any:
+    """Invokes fn, passing request_id only if fn accepts it."""
+    if request_id is not None:
+        try:
+            sig = inspect.signature(fn)
+            params = sig.parameters
+            if "request_id" in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            ):
+                kwargs["request_id"] = request_id
+        except (TypeError, ValueError):
+            pass
+    return fn(*args, **kwargs)
+
+
+async def run_sync_with_stats(
+    func: Any,
+    *,
+    limiter: anyio.CapacityLimiter,
+    stats_collector: Optional[StatsCollector] = None,
+    worker_type: str = "unary",
+) -> Any:
+    """Acquires concurrency limiter, records wait time and active worker threads, and runs func."""
+    t0 = time.perf_counter()
+    async with limiter:
+        wait_ms = (time.perf_counter() - t0) * 1000.0
+        if stats_collector is not None:
+            stats_collector.record_worker_semaphore_wait(worker_type, wait_ms)
+            stats_collector.worker_thread_enter(worker_type)
+        try:
+            return await anyio.to_thread.run_sync(func)
+        finally:
+            if stats_collector is not None:
+                stats_collector.worker_thread_exit(worker_type)
+
+
 def get_current_principal(
     request: Request,
     settings: APISettings = Depends(get_api_settings),
@@ -261,6 +341,17 @@ def get_current_principal(
         x_api_key=request.headers.get("x-api-key"),
         x_owner_id=request.headers.get("x-owner-id"),
     )
+
+
+def require_admin_principal(
+    principal: Principal = Depends(get_current_principal),
+) -> Principal:
+    """Requires `'admin'` scope on the authenticated principal."""
+    if "admin" not in principal.scopes:
+        raise APIAuthorizationError(
+            f"Principal '{principal.owner_id}' lacks required 'admin' scope."
+        )
+    return principal
 
 
 def authenticate_websocket(websocket: WebSocket) -> Principal:

@@ -7,6 +7,7 @@ per schema profile to avoid vendor revision collisions.
 """
 from __future__ import annotations
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence, Union, Dict, Any, List, Iterator, Tuple
@@ -17,6 +18,7 @@ except ImportError:
     libyang = None
 
 from core.schema_errors import SchemaError, SchemaProfileConflictError
+from modules.stats_hooks import NOOP_STATS_RECORDER, StatsRecorder, safe_record
 
 
 @dataclass
@@ -87,10 +89,19 @@ class ContextRegistry:
     Thread-safe registry managing isolated SchemaContext instances keyed by profile_id.
     """
 
-    def __init__(self):
+    def __init__(self, stats_recorder: Optional[StatsRecorder] = None):
         self._lock = threading.RLock()
         self._contexts: Dict[str, SchemaContext] = {}
         self._profiles: Dict[str, Any] = {}
+        self._stats_recorder: StatsRecorder = stats_recorder or NOOP_STATS_RECORDER
+
+    def set_stats_recorder(self, stats_recorder: Optional[StatsRecorder]) -> None:
+        with self._lock:
+            self._stats_recorder = stats_recorder or NOOP_STATS_RECORDER
+
+    def profile_count(self) -> int:
+        with self._lock:
+            return len(self._contexts)
 
     def get_or_create_context(
         self,
@@ -123,9 +134,11 @@ class ContextRegistry:
                 sctx = self._contexts[profile_id]
                 for d in norm_dirs:
                     sctx.add_search_dir(d)
+                safe_record(self._stats_recorder.record_schema_cache_access, True, "memory_context")
                 return sctx
 
             # Instantiate a new isolated libyang.Context
+            t0 = time.perf_counter()
             search_path_str = ":".join(str(d) for d in norm_dirs) if norm_dirs else None
             ctx = libyang.Context(search_path=search_path_str, disable_searchdir_cwd=True)
 
@@ -135,6 +148,13 @@ class ContextRegistry:
                 search_dirs=norm_dirs,
             )
             self._contexts[profile_id] = sctx
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            safe_record(
+                self._stats_recorder.record_schema_context_compiled,
+                profile_id,
+                elapsed_ms,
+                len(self._contexts),
+            )
             return sctx
 
     def get_context(self, profile_id: str) -> Optional[SchemaContext]:

@@ -23,6 +23,7 @@ except ImportError:
 
 from config.schema import SchemaProfile, ModuleRef, SubmoduleRef, FeatureRef, DeviationRef
 from core.schema_errors import SchemaCacheError
+from modules.stats_hooks import NOOP_STATS_RECORDER, StatsRecorder, safe_record
 
 
 class SchemaDB:
@@ -35,7 +36,9 @@ class SchemaDB:
         self,
         db_path: Optional[Union[str, Path]] = None,
         cache_dir: Optional[Union[str, Path]] = None,
+        stats_recorder: Optional[StatsRecorder] = None,
     ):
+        self._stats_recorder: StatsRecorder = stats_recorder or NOOP_STATS_RECORDER
         if cache_dir is None:
             self.cache_dir = Path.home() / ".cache" / "gnmi_client_py"
         else:
@@ -302,6 +305,10 @@ class SchemaDB:
                 raise SchemaCacheError(f"Error caching schema module '{name}': {e}") from e
             raise
 
+    def set_stats_recorder(self, stats_recorder: Optional[StatsRecorder]) -> None:
+        with self._lock:
+            self._stats_recorder = stats_recorder or NOOP_STATS_RECORDER
+
     def find_module(
         self,
         name: str,
@@ -326,6 +333,7 @@ class SchemaDB:
                 )
                 row = cursor.fetchone()
                 if row and self._verify_and_return_path(row["file_path"], row["sha256"]):
+                    safe_record(self._stats_recorder.record_schema_cache_access, True, "disk_db")
                     return Path(row["file_path"])
 
             # Priority 2: Exact name + exact revision
@@ -336,7 +344,9 @@ class SchemaDB:
                 )
                 row = cursor.fetchone()
                 if row and self._verify_and_return_path(row["file_path"], row["sha256"]):
+                    safe_record(self._stats_recorder.record_schema_cache_access, True, "disk_db")
                     return Path(row["file_path"])
+                safe_record(self._stats_recorder.record_schema_cache_access, False, "local_dir")
                 return None
 
             # Priority 3: Name-only lookup (when revision is None)
@@ -348,6 +358,7 @@ class SchemaDB:
             for r in rows:
                 p = self._verify_and_return_path(r["file_path"], r["sha256"])
                 if p:
+                    safe_record(self._stats_recorder.record_schema_cache_access, True, "disk_db")
                     return Path(p)
 
             # Fallback: Check models directory for RFC naming conventions
@@ -355,13 +366,17 @@ class SchemaDB:
             if revision:
                 expected_p = self.models_dir / f"{name}@{revision}.yang"
                 if expected_p.exists():
+                    safe_record(self._stats_recorder.record_schema_cache_access, True, "disk_db")
                     return expected_p
             elif candidates:
+                safe_record(self._stats_recorder.record_schema_cache_access, True, "disk_db")
                 return sorted(candidates, reverse=True)[0]
             name_p = self.models_dir / f"{name}.yang"
             if name_p.exists() and revision is None:
+                safe_record(self._stats_recorder.record_schema_cache_access, True, "disk_db")
                 return name_p
 
+            safe_record(self._stats_recorder.record_schema_cache_access, False, "local_dir")
             return None
 
     def _verify_and_return_path(self, file_path_str: str, expected_sha: str) -> Optional[str]:

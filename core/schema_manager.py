@@ -23,6 +23,7 @@ from core.schema_resolver import SchemaResolver
 from core.schema_validator import SchemaValidator
 from core.schema_serializer import SchemaSerializer
 from core.schema_errors import SchemaError, SchemaNotFoundError
+from modules.stats_hooks import NOOP_STATS_RECORDER, StatsRecorder
 
 
 class SchemaManager:
@@ -55,13 +56,30 @@ class SchemaManager:
             self.resolver = SchemaResolver(schema_db=self.db)
             self.validator = SchemaValidator()
             self.serializer = SchemaSerializer()
+            self._stats_recorder: StatsRecorder = NOOP_STATS_RECORDER
             self._initialized = True
+
+    def set_stats_recorder(self, stats_recorder: Optional[StatsRecorder]) -> None:
+        """Sets the runtime StatsRecorder across SchemaManager and its child subsystems."""
+        with self._lock:
+            rec = stats_recorder or NOOP_STATS_RECORDER
+            self._stats_recorder = rec
+            if hasattr(self, "db") and hasattr(self.db, "set_stats_recorder"):
+                self.db.set_stats_recorder(rec)
+            if hasattr(self, "registry") and hasattr(self.registry, "set_stats_recorder"):
+                self.registry.set_stats_recorder(rec)
+            if hasattr(self, "validator") and hasattr(self.validator, "set_stats_recorder"):
+                self.validator.set_stats_recorder(rec)
 
     @classmethod
     def reset_instance(cls) -> None:
         """Resets the singleton for clean test isolation."""
         with cls._lock:
             if cls._instance is not None:
+                try:
+                    cls._instance.set_stats_recorder(NOOP_STATS_RECORDER)
+                except Exception:
+                    pass
                 try:
                     cls._instance.db.close()
                 except Exception:
@@ -218,6 +236,7 @@ class SchemaManager:
         path: Union[str, PathSelector],
         profile_id: str,
         operation: Optional[OperationConfig] = None,
+        stats_recorder: Optional[StatsRecorder] = None,
     ) -> Any:
         """
         Validates an XPath path against the compiled context for profile_id.
@@ -225,7 +244,12 @@ class SchemaManager:
         sctx = self.registry.get_context(profile_id)
         if sctx is None:
             raise SchemaError(f"No SchemaContext initialized for profile '{profile_id}'")
-        return self.validator.validate_path(path=path, schema_context=sctx, operation=operation)
+        return self.validator.validate_path(
+            path=path,
+            schema_context=sctx,
+            operation=operation,
+            stats_recorder=stats_recorder,
+        )
 
     def validate_payload(
         self,
@@ -233,6 +257,7 @@ class SchemaManager:
         value: Any,
         profile_id: str,
         operation: Optional[OperationConfig] = None,
+        stats_recorder: Optional[StatsRecorder] = None,
     ) -> None:
         """
         Validates value constraints against compiled schema at path.
@@ -245,6 +270,7 @@ class SchemaManager:
             value=value,
             schema_context=sctx,
             operation=operation,
+            stats_recorder=stats_recorder,
         )
 
     def validate_and_serialize_netconf_edit(

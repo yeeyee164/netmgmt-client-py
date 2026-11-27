@@ -354,6 +354,14 @@ def build_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument('--syslog-server', default='', help="IP:PORT of Syslog server")
     parser.add_argument('--log-file', default='', help="Path to save local logs")
 
+    # statistics & observability options
+    parser.add_argument('--stats', action='store_true', default=False,
+                        help="Print execution statistics summary to stderr upon completion")
+    parser.add_argument('--stats-format', default='table', choices=['table', 'json'],
+                        help="Format for CLI execution statistics output (default: table)")
+    parser.add_argument('--stats-file', default=None,
+                        help="Optional file path to export JSON execution statistics snapshot")
+
     add_schema_args(parser, is_child=False)
 
     proto_parser = parser.add_subparsers(dest='protocol', help="select NB protcol")

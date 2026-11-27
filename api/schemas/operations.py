@@ -16,6 +16,7 @@ from api.schemas.common import (
     StrictRequestModel,
 )
 from api.schemas.devices import AdhocEndpointSchema
+from api.schemas.stats import ExecutionStatsSchema
 
 
 class MutationChangeSchema(StrictRequestModel):
@@ -138,3 +139,4 @@ class ExecutionResultSchema(BaseModel):
     error_summary: str | None = None
     error_code: str | None = None
     execution_time_ms: float = 0.0
+    stats: ExecutionStatsSchema | None = None

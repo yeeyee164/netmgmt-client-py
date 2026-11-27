@@ -26,6 +26,15 @@ from application.dto import (
     ExecutionResultDTO,
     StreamEventDTO,
     SessionInfoDTO,
+    LatencySummaryDTO,
+    ExecutionStepStatsDTO,
+    ExecutionStatsDTO,
+    SubscriptionStatsDTO,
+    OperationStatsSummaryDTO,
+    SessionStatsSummaryDTO,
+    SchemaStatsSummaryDTO,
+    RuntimeHealthStatsDTO,
+    StatsSnapshotDTO,
     expand_request_repetitions,
 )
 from application.devices import DeviceRegistryService, load_endpoints_from_env_file
@@ -38,6 +47,11 @@ from application.sessions import (
     DeviceSessionManager,
     LogicalSessionState,
     SessionLease,
+)
+from application.stats import (
+    ExecutionStatsScope,
+    StatsCollector,
+    StatsService,
 )
 
 __all__ = [
@@ -62,6 +76,15 @@ __all__ = [
     "ExecutionResultDTO",
     "StreamEventDTO",
     "SessionInfoDTO",
+    "LatencySummaryDTO",
+    "ExecutionStepStatsDTO",
+    "ExecutionStatsDTO",
+    "SubscriptionStatsDTO",
+    "OperationStatsSummaryDTO",
+    "SessionStatsSummaryDTO",
+    "SchemaStatsSummaryDTO",
+    "RuntimeHealthStatsDTO",
+    "StatsSnapshotDTO",
     "expand_request_repetitions",
     # Services
     "DeviceRegistryService",
@@ -78,5 +101,8 @@ __all__ = [
     "DeviceSessionManager",
     "LogicalSessionState",
     "SessionLease",
+    "StatsCollector",
+    "ExecutionStatsScope",
+    "StatsService",
 ]
 

@@ -4,6 +4,7 @@ FastAPI routes for managed logical device sessions and cross-request session exe
 """
 
 from functools import partial
+from typing import Optional
 
 import anyio
 from fastapi import APIRouter, Depends, Response, status
@@ -12,6 +13,7 @@ from application.dto import validate_protocol_operation
 from application.exceptions import SessionNotFoundError
 from application.operations import DeviceOperationService
 from application.sessions import DeviceSessionManager
+from application.stats import StatsCollector
 from api.adapters import (
     to_execution_result_schema,
     to_session_execution_request_dto,
@@ -20,11 +22,15 @@ from api.adapters import (
 from api.deps import (
     APISettings,
     Principal,
+    call_with_optional_request_id,
     get_api_settings,
     get_current_principal,
     get_operation_service,
+    get_request_id,
     get_rpc_limiter,
     get_session_manager,
+    get_stats_collector,
+    run_sync_with_stats,
 )
 from api.schemas.operations import ExecutionResultSchema
 from api.schemas.sessions import (
@@ -125,15 +131,19 @@ async def execute_session_operations(
     session_manager: DeviceSessionManager = Depends(get_session_manager),
     operation_service: DeviceOperationService = Depends(get_operation_service),
     limiter: anyio.CapacityLimiter = Depends(get_rpc_limiter),
+    stats_collector: Optional[StatsCollector] = Depends(get_stats_collector),
+    request_id: str = Depends(get_request_id),
 ) -> ExecutionResultSchema:
     """Executes operations within an existing managed logical session."""
-    session_info = await anyio.to_thread.run_sync(
+    session_info = await run_sync_with_stats(
         partial(
             session_manager.get_session_info,
             session_id,
             owner_id=principal.owner_id,
         ),
         limiter=limiter,
+        stats_collector=stats_collector,
+        worker_type="session",
     )
     request_dto = to_session_execution_request_dto(
         payload, session_info, settings=settings
@@ -141,13 +151,17 @@ async def execute_session_operations(
     for step in request_dto.operations:
         validate_protocol_operation(session_info.protocol, step.op_type)
 
-    result_dto = await anyio.to_thread.run_sync(
+    result_dto = await run_sync_with_stats(
         partial(
+            call_with_optional_request_id,
             operation_service.execute_in_session,
             session_id,
             request_dto,
             owner_id=principal.owner_id,
+            request_id=request_id,
         ),
         limiter=limiter,
+        stats_collector=stats_collector,
+        worker_type="session",
     )
     return to_execution_result_schema(result_dto)
